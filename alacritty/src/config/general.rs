@@ -18,6 +18,16 @@ pub struct General {
     /// [`toml::Value`], but still present to prevent unused field warnings.
     pub import: Vec<String>,
 
+    /// Imports applied only when the system is in dark mode. Like `import`, this
+    /// is read from the config's [`toml::Value`] and only present here to
+    /// prevent unused field warnings.
+    pub import_dark: Vec<String>,
+
+    /// Imports applied only when the system is in light mode. Like `import`,
+    /// this is read from the config's [`toml::Value`] and only present here to
+    /// prevent unused field warnings.
+    pub import_light: Vec<String>,
+
     /// Shell startup directory.
     pub working_directory: Option<PathBuf>,
 
@@ -36,6 +46,8 @@ impl Default for General {
             ipc_socket: true,
             working_directory: Default::default(),
             import: Default::default(),
+            import_dark: Default::default(),
+            import_light: Default::default(),
         }
     }
 }

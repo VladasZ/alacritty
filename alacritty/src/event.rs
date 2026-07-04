@@ -32,7 +32,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop, EventLoopProxy};
 use winit::raw_window_handle::HasDisplayHandle;
-use winit::window::WindowId;
+use winit::window::{Theme as WinitTheme, WindowId};
 
 use alacritty_terminal::event::{Event as TerminalEvent, EventListener, Notify};
 use alacritty_terminal::event_loop::Notifier;
@@ -153,12 +153,25 @@ impl Processor {
         event_loop: &ActiveEventLoop,
         window_options: WindowOptions,
     ) -> Result<(), Box<dyn Error>> {
-        let window_context = WindowContext::initial(
+        let mut window_context = WindowContext::initial(
             event_loop,
             self.proxy.clone(),
             self.config.clone(),
             window_options,
         )?;
+
+        // Apply the real system appearance before the first draw, so the theme
+        // aware colors show with no flash from the default scheme.
+        if let Some(theme) = window_context.display.window.theme() {
+            if config::set_system_theme(theme == WinitTheme::Dark) {
+                if let Some(path) = self.config.config_paths.first().cloned() {
+                    if let Ok(config) = config::reload(&path, &mut self.cli_options) {
+                        self.config = Rc::new(config);
+                        window_context.update_config(self.config.clone());
+                    }
+                }
+            }
+        }
 
         self.gl_config = Some(window_context.display.gl_context().config());
         self.windows.insert(window_context.id(), window_context);
@@ -254,6 +267,17 @@ impl ApplicationHandler<Event> for Processor {
     ) {
         if self.config.debug.print_events {
             info!(target: LOG_TARGET_WINIT, "{event:?}");
+        }
+
+        // A system appearance change reloads the config so import_light or
+        // import_dark is re-picked and the colors switch live.
+        if let WindowEvent::ThemeChanged(theme) = &event {
+            if config::set_system_theme(*theme == WinitTheme::Dark) {
+                if let Some(path) = self.config.config_paths.first().cloned() {
+                    let _ = self.proxy.send_event(Event::new(EventType::ConfigReload(path), None));
+                }
+            }
+            return;
         }
 
         // Ignore all events we do not care about.

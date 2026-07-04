@@ -1,6 +1,7 @@
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::result::Result as StdResult;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::{env, fs, io};
 
 use log::{debug, error, info, warn};
@@ -38,6 +39,23 @@ use crate::logging::LOG_TARGET_CONFIG;
 
 /// Maximum number of depth for the configuration file imports.
 pub const IMPORT_RECURSION_LIMIT: usize = 5;
+
+/// System color scheme used to choose between `import_light` and `import_dark`.
+const THEME_UNKNOWN: u8 = 0;
+const THEME_LIGHT: u8 = 1;
+const THEME_DARK: u8 = 2;
+
+/// Active system appearance, read while resolving imports so a config reload
+/// picks the matching `import_light` or `import_dark` list. Set from the winit
+/// theme at window creation and on every system appearance change.
+static SYSTEM_THEME: AtomicU8 = AtomicU8::new(THEME_UNKNOWN);
+
+/// Record the current system appearance. Returns true when it changed, so the
+/// caller only reloads the config on a real switch.
+pub fn set_system_theme(dark: bool) -> bool {
+    let next = if dark { THEME_DARK } else { THEME_LIGHT };
+    SYSTEM_THEME.swap(next, Ordering::Relaxed) != next
+}
 
 /// Result from config loading.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -282,13 +300,15 @@ pub fn imports(
     base_path: &Path,
     recursion_limit: usize,
 ) -> StdResult<Vec<StdResult<PathBuf, String>>, String> {
-    let imports =
-        config.get("import").or_else(|| config.get("general").and_then(|g| g.get("import")));
-    let imports = match imports {
-        Some(Value::Array(imports)) => imports,
-        Some(_) => return Err("Invalid import type: expected a sequence".into()),
-        None => return Ok(Vec::new()),
-    };
+    // Collect the base imports plus the theme specific imports for the current
+    // system appearance, so import_dark or import_light layers on top of import.
+    let mut imports = Vec::new();
+    collect_imports(config, "import", &mut imports)?;
+    match SYSTEM_THEME.load(Ordering::Relaxed) {
+        THEME_DARK => collect_imports(config, "import_dark", &mut imports)?,
+        THEME_LIGHT => collect_imports(config, "import_light", &mut imports)?,
+        _ => {},
+    }
 
     // Limit recursion to prevent infinite loops.
     if !imports.is_empty() && recursion_limit == 0 {
@@ -297,7 +317,7 @@ pub fn imports(
 
     let mut import_paths = Vec::new();
 
-    for import in imports {
+    for import in &imports {
         let path = match import {
             Value::String(path) => PathBuf::from(path),
             _ => {
@@ -312,6 +332,19 @@ pub fn imports(
     }
 
     Ok(import_paths)
+}
+
+/// Append the string entries of a top level or `general` array key to `out`.
+fn collect_imports(config: &Value, key: &str, out: &mut Vec<Value>) -> StdResult<(), String> {
+    let value = config.get(key).or_else(|| config.get("general").and_then(|g| g.get(key)));
+    match value {
+        Some(Value::Array(items)) => {
+            out.extend(items.iter().cloned());
+            Ok(())
+        },
+        Some(_) => Err(format!("Invalid {key} type: expected a sequence")),
+        None => Ok(()),
+    }
 }
 
 /// Normalize import paths.
@@ -449,5 +482,32 @@ window = "Hello""#
         "#;
         let toml = yaml_to_toml(contents);
         assert!(toml.is_empty());
+    }
+
+    #[test]
+    fn theme_aware_imports() {
+        let value: Value = toml::from_str(
+            r#"
+            import = ["base.toml"]
+            import_dark = ["dark.toml"]
+            import_light = ["light.toml"]
+        "#,
+        )
+        .unwrap();
+        let base = Path::new("/cfg/alacritty.toml");
+
+        let names = |v: &Value| -> Vec<String> {
+            imports(v, base, IMPORT_RECURSION_LIMIT)
+                .unwrap()
+                .into_iter()
+                .map(|p| p.unwrap().file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+
+        set_system_theme(true);
+        assert_eq!(names(&value), vec!["base.toml", "dark.toml"]);
+
+        set_system_theme(false);
+        assert_eq!(names(&value), vec!["base.toml", "light.toml"]);
     }
 }
