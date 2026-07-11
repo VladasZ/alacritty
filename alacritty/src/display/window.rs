@@ -35,8 +35,8 @@ use winit::monitor::MonitorHandle;
 use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{
-    CursorIcon, Fullscreen, ImePurpose, Theme, UserAttentionType, Window as WinitWindow,
-    WindowAttributes, WindowId,
+    CursorIcon, Fullscreen, ImePurpose, ResizeDirection, Theme, UserAttentionType,
+    Window as WinitWindow, WindowAttributes, WindowId,
 };
 
 use alacritty_terminal::index::Point;
@@ -199,6 +199,14 @@ impl Window {
         #[cfg(target_os = "macos")]
         use_srgb_color_space(&window);
 
+        // The tab strip lives in the native titlebar area. Stop the titlebar
+        // from moving the window so dragging a tab reorders it instead. Empty
+        // strip areas still move the window through our own drag handling.
+        #[cfg(target_os = "macos")]
+        if config.window.decorations != Decorations::Full {
+            set_window_movable(&window, false);
+        }
+
         let scale_factor = window.scale_factor();
         log::info!("Window scale factor: {scale_factor}");
         let is_x11 = matches!(window.window_handle().unwrap().as_raw(), RawWindowHandle::Xlib(_));
@@ -306,7 +314,7 @@ impl Window {
 
         let builder = WinitWindow::default_attributes()
             .with_name(&identity.class.general, &identity.class.instance)
-            .with_decorations(window_config.decorations != Decorations::None);
+            .with_decorations(window_config.decorations == Decorations::Full);
 
         #[cfg(feature = "x11")]
         let builder = builder.with_window_icon(Some(icon));
@@ -325,7 +333,7 @@ impl Window {
         let icon = winit::window::Icon::from_resource(IDI_ICON, None);
 
         WinitWindow::default_attributes()
-            .with_decorations(window_config.decorations != Decorations::None)
+            .with_decorations(window_config.decorations == Decorations::Full)
             .with_window_icon(icon.as_ref().ok().cloned())
             .with_taskbar_icon(icon.ok())
     }
@@ -393,9 +401,34 @@ impl Window {
         self.set_fullscreen(self.window.fullscreen().is_none());
     }
 
+    /// Whether the window is in any fullscreen mode.
+    ///
+    /// The tab strip uses this to drop the macOS traffic-light inset, since the
+    /// lights are hidden while fullscreen.
+    pub fn is_fullscreen(&self) -> bool {
+        if self.window.fullscreen().is_some() {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        if self.window.simple_fullscreen() {
+            return true;
+        }
+        false
+    }
+
     /// Toggle the window's maximized state.
     pub fn toggle_maximized(&self) {
         self.set_maximized(!self.window.is_maximized());
+    }
+
+    /// Begin an interactive drag of the window, used by the tab strip caption.
+    pub fn drag_window(&self) {
+        let _ = self.window.drag_window();
+    }
+
+    /// Begin an interactive resize of the window from the given edge or corner.
+    pub fn drag_resize_window(&self, direction: ResizeDirection) {
+        let _ = self.window.drag_resize_window(direction);
     }
 
     /// Inform windowing system about presenting to the window.
@@ -486,35 +519,6 @@ impl Window {
 
         view.window().unwrap().setHasShadow(has_shadows);
     }
-
-    /// Select tab at the given `index`.
-    #[cfg(target_os = "macos")]
-    pub fn select_tab_at_index(&self, index: usize) {
-        self.window.select_tab_at_index(index);
-    }
-
-    /// Select the last tab.
-    #[cfg(target_os = "macos")]
-    pub fn select_last_tab(&self) {
-        self.window.select_tab_at_index(self.window.num_tabs() - 1);
-    }
-
-    /// Select next tab.
-    #[cfg(target_os = "macos")]
-    pub fn select_next_tab(&self) {
-        self.window.select_next_tab();
-    }
-
-    /// Select previous tab.
-    #[cfg(target_os = "macos")]
-    pub fn select_previous_tab(&self) {
-        self.window.select_previous_tab();
-    }
-
-    #[cfg(target_os = "macos")]
-    pub fn tabbing_id(&self) -> String {
-        self.window.tabbing_identifier()
-    }
 }
 
 bitflags! {
@@ -538,4 +542,17 @@ fn use_srgb_color_space(window: &WinitWindow) {
     };
 
     view.window().unwrap().setColorSpace(Some(&NSColorSpace::sRGBColorSpace()));
+}
+
+#[cfg(target_os = "macos")]
+fn set_window_movable(window: &WinitWindow, movable: bool) {
+    let view = match window.window_handle().unwrap().as_raw() {
+        RawWindowHandle::AppKit(handle) => {
+            assert!(MainThreadMarker::new().is_some());
+            unsafe { handle.ns_view.cast::<NSView>().as_ref() }
+        },
+        _ => return,
+    };
+
+    view.window().unwrap().setMovable(movable);
 }

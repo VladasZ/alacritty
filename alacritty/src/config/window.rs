@@ -181,8 +181,8 @@ pub enum StartupMode {
 
 #[derive(ConfigDeserialize, Serialize, Default, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Decorations {
-    #[default]
     Full,
+    #[default]
     Transparent,
     Buttonless,
     None,

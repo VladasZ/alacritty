@@ -39,6 +39,7 @@ use alacritty_terminal::vte::ansi::{CursorShape, NamedColor};
 use crate::config::UiConfig;
 use crate::config::debug::RendererPreference;
 use crate::config::font::Font;
+use crate::config::tabs::TabBarEdge;
 use crate::config::window::Dimensions;
 #[cfg(not(windows))]
 use crate::config::window::StartupMode;
@@ -66,6 +67,8 @@ pub mod window;
 mod bell;
 mod damage;
 mod meter;
+mod screenshot;
+mod tab_bar;
 
 /// Label for the forward terminal search bar.
 const FORWARD_SEARCH_LABEL: &str = "Search: ";
@@ -161,6 +164,9 @@ pub struct SizeInfo<T = f32> {
     /// Vertical window padding.
     padding_y: T,
 
+    /// Bottom window padding.
+    padding_bottom_y: T,
+
     /// Number of lines in the viewport.
     screen_lines: usize,
 
@@ -177,8 +183,9 @@ impl From<SizeInfo<f32>> for SizeInfo<u32> {
             cell_height: size_info.cell_height as u32,
             padding_x: size_info.padding_x as u32,
             padding_y: size_info.padding_y as u32,
+            padding_bottom_y: size_info.padding_bottom_y as u32,
             screen_lines: size_info.screen_lines,
-            columns: size_info.screen_lines,
+            columns: size_info.columns,
         }
     }
 }
@@ -224,6 +231,11 @@ impl<T: Clone + Copy> SizeInfo<T> {
     pub fn padding_y(&self) -> T {
         self.padding_y
     }
+
+    #[inline]
+    pub fn padding_bottom_y(&self) -> T {
+        self.padding_bottom_y
+    }
 }
 
 impl SizeInfo<f32> {
@@ -255,6 +267,7 @@ impl SizeInfo<f32> {
             cell_height,
             padding_x: padding_x.floor(),
             padding_y: padding_y.floor(),
+            padding_bottom_y: padding_y.floor(),
             screen_lines,
             columns,
         }
@@ -263,6 +276,24 @@ impl SizeInfo<f32> {
     #[inline]
     pub fn reserve_lines(&mut self, count: usize) {
         self.screen_lines = cmp::max(self.screen_lines.saturating_sub(count), MIN_SCREEN_LINES);
+    }
+
+    /// Reserve vertical space in pixels by dropping grid lines.
+    ///
+    /// The fractional slack left over below the grid is used up first, so a
+    /// reservation that is not a whole number of lines does not waste a line.
+    /// Call this before `reserve_lines` and `add_top_padding`, both invalidate
+    /// the slack computation.
+    #[inline]
+    pub fn reserve_height(&mut self, height: f32) {
+        let slack = self.height - 2. * self.padding_y - self.screen_lines as f32 * self.cell_height;
+        let lines = ((height - slack) / self.cell_height).ceil().max(0.) as usize;
+        self.screen_lines = cmp::max(self.screen_lines.saturating_sub(lines), MIN_SCREEN_LINES);
+    }
+
+    #[inline]
+    pub fn add_top_padding(&mut self, padding: f32) {
+        self.padding_y += padding;
     }
 
     /// Check if coordinates are inside the terminal grid.
@@ -300,6 +331,21 @@ impl TermDimensions for SizeInfo {
     }
 }
 
+/// Tab bar space to reserve during a display update.
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TabBarLayout {
+    pub visible: bool,
+    pub at_top: bool,
+    pub title_editor_lines: usize,
+}
+
+/// Tab strip content for one frame.
+#[derive(Copy, Clone)]
+pub struct TabBarContent<'a> {
+    pub titles: &'a [(String, bool)],
+    pub title_editor: Option<&'a str>,
+}
+
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct DisplayUpdate {
     pub dirty: bool,
@@ -307,11 +353,16 @@ pub struct DisplayUpdate {
     dimensions: Option<PhysicalSize<u32>>,
     cursor_dirty: bool,
     font: Option<Font>,
+    tab_bar: TabBarLayout,
 }
 
 impl DisplayUpdate {
     pub fn dimensions(&self) -> Option<PhysicalSize<u32>> {
         self.dimensions
+    }
+
+    pub fn tab_bar(&self) -> TabBarLayout {
+        self.tab_bar
     }
 
     pub fn font(&self) -> Option<&Font> {
@@ -336,6 +387,12 @@ impl DisplayUpdate {
         self.cursor_dirty = true;
         self.dirty = true;
     }
+
+    // Layout context for the next update, not a change trigger, so it does
+    // not set dirty.
+    pub fn set_tab_bar(&mut self, tab_bar: TabBarLayout) {
+        self.tab_bar = tab_bar;
+    }
 }
 
 /// The display wraps a window, font rasterizer, and GPU renderer.
@@ -343,6 +400,15 @@ pub struct Display {
     pub window: Window,
 
     pub size_info: SizeInfo,
+
+    /// Pending request to save the framebuffer to a PNG on the next draw.
+    pub pending_screenshot: bool,
+
+    /// Tab bar element under the mouse, for hover highlighting.
+    pub hovered_tab: Option<TabHit>,
+
+    /// In-progress tab drag, the pressed tab follows the pointer.
+    pub tab_drag: Option<TabDrag>,
 
     /// Hint highlighted by the mouse.
     pub highlighted_hint: Option<HintMatch>,
@@ -387,6 +453,7 @@ pub struct Display {
 
     // Mouse point position when highlighting hints.
     hint_mouse_point: Option<Point>,
+    tab_hit_boxes: Vec<TabHitBox>,
 
     renderer: ManuallyDrop<Renderer>,
     renderer_preference: Option<RendererPreference>,
@@ -397,6 +464,57 @@ pub struct Display {
 
     glyph_cache: GlyphCache,
     meter: Meter,
+}
+
+/// What a click on the tab bar does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabHit {
+    /// Select the tab at this index.
+    Select(usize),
+    /// Close the tab at this index.
+    Close(usize),
+    /// Open a new tab.
+    New,
+    /// Minimize the window.
+    #[cfg(not(target_os = "macos"))]
+    Minimize,
+    /// Toggle the window maximized state.
+    #[cfg(not(target_os = "macos"))]
+    MaximizeToggle,
+    /// Close the whole window.
+    #[cfg(not(target_os = "macos"))]
+    WindowClose,
+    /// Empty strip area, used to drag the window.
+    Caption,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TabHitBox {
+    hit: TabHit,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+/// State of a browser style tab drag.
+#[derive(Clone, Copy, Debug)]
+pub struct TabDrag {
+    /// Current index of the dragged tab, updated as it swaps past neighbors.
+    pub index: usize,
+    /// Pointer offset from the tab's left edge at press time.
+    pub grab_dx: f32,
+    /// Latest pointer x position.
+    pub pointer_x: f32,
+    /// Pointer x at press, for the click versus drag threshold.
+    pub press_x: f32,
+    /// True once the pointer traveled far enough to start the drag.
+    pub active: bool,
+}
+
+#[inline]
+fn term_dimensions_changed<T, S: TermDimensions>(terminal: &Term<T>, size: &S) -> bool {
+    terminal.screen_lines() != size.screen_lines() || terminal.columns() != size.columns()
 }
 
 impl Display {
@@ -516,6 +634,9 @@ impl Display {
 
         Ok(Self {
             context: ManuallyDrop::new(context),
+            pending_screenshot: false,
+            hovered_tab: None,
+            tab_drag: None,
             visual_bell: VisualBell::from(&config.bell),
             renderer: ManuallyDrop::new(renderer),
             renderer_preference: config.debug.renderer,
@@ -535,6 +656,7 @@ impl Display {
             vi_highlighted_hint: Default::default(),
             highlighted_hint: Default::default(),
             hint_mouse_point: Default::default(),
+            tab_hit_boxes: Default::default(),
             pending_update: Default::default(),
             cursor_hidden: Default::default(),
             meter: Default::default(),
@@ -545,6 +667,14 @@ impl Display {
     #[inline]
     pub fn gl_context(&self) -> &PossiblyCurrentContext {
         &self.context
+    }
+
+    pub fn clear_hint_highlights(&mut self) {
+        self.highlighted_hint = None;
+        self.highlighted_hint_age = 0;
+        self.vi_highlighted_hint = None;
+        self.vi_highlighted_hint_age = 0;
+        self.hint_mouse_point = None;
     }
 
     pub fn make_not_current(&mut self) {
@@ -659,6 +789,7 @@ impl Display {
         T: EventListener,
     {
         let pending_update = mem::take(&mut self.pending_update);
+        let tab_bar = pending_update.tab_bar();
 
         let (mut cell_width, mut cell_height) =
             (self.size_info.cell_width(), self.size_info.cell_height());
@@ -703,7 +834,14 @@ impl Display {
         let search_active = search_state.history_index.is_some();
         let message_bar_lines = message_buffer.message().map_or(0, |m| m.text(&new_size).len());
         let search_lines = usize::from(search_active);
-        new_size.reserve_lines(message_bar_lines + search_lines);
+        if tab_bar.visible {
+            let bar_height = config.tabs.tab_bar_height.as_f32() * new_size.cell_height();
+            new_size.reserve_height(bar_height);
+            if tab_bar.at_top {
+                new_size.add_top_padding(bar_height);
+            }
+        }
+        new_size.reserve_lines(message_bar_lines + search_lines + tab_bar.title_editor_lines);
 
         // Update resize increments.
         if config.window.resize_increments {
@@ -711,9 +849,7 @@ impl Display {
         }
 
         // Resize when terminal when its dimensions have changed.
-        if self.size_info.screen_lines() != new_size.screen_lines
-            || self.size_info.columns() != new_size.columns()
-        {
+        if term_dimensions_changed(terminal, &new_size) {
             // Resize PTY.
             pty_resize_handle.on_resize(new_size.into());
 
@@ -779,6 +915,7 @@ impl Display {
         message_buffer: &MessageBuffer,
         config: &UiConfig,
         search_state: &mut SearchState,
+        tab_bar: TabBarContent<'_>,
     ) {
         // Collect renderable content before the terminal is dropped.
         let mut content = RenderableContent::new(config, self, &terminal, search_state);
@@ -961,8 +1098,11 @@ impl Display {
             }
         }
 
+        let tab_title_editor_offset = usize::from(tab_bar.title_editor.is_some());
+
         if let Some(message) = message_buffer.message() {
-            let search_offset = usize::from(search_state.regex().is_some());
+            let search_offset =
+                usize::from(search_state.regex().is_some()) + tab_title_editor_offset;
             let text = message.text(&size_info);
 
             // Create a new rectangle for the background.
@@ -1008,6 +1148,35 @@ impl Display {
             self.renderer.draw_rects(&size_info, &metrics, rects);
         }
 
+        if let Some(title_editor) = tab_bar.title_editor {
+            let line = size_info.screen_lines() + usize::from(search_state.regex().is_some());
+            self.draw_footer_text(
+                config,
+                &format_search_prompt("Tab title: ", title_editor, size_info.columns()),
+                line,
+            );
+            let y = size_info.cell_height().mul_add(line as f32, size_info.padding_y()) as i32;
+            let width = size_info.width() as i32;
+            let height = size_info.cell_height() as i32;
+            self.damage_tracker.frame().add_viewport_rect(&size_info, 0, y, width, height);
+            self.damage_tracker.next_frame().add_viewport_rect(&size_info, 0, y, width, height);
+        }
+
+        self.tab_hit_boxes.clear();
+        if config.tabs.display_tab_bar(tab_bar.titles.len()) {
+            let line = match config.tabs.tab_bar_edge {
+                TabBarEdge::Top => 0,
+                TabBarEdge::Bottom => {
+                    let search_lines =
+                        usize::from(search_state.regex().is_some()) + tab_title_editor_offset;
+                    let message_lines =
+                        message_buffer.message().map_or(0, |m| m.text(&size_info).len());
+                    size_info.screen_lines() + search_lines + message_lines
+                },
+            };
+            self.draw_tab_bar(config, tab_bar.titles, line);
+        }
+
         self.draw_render_timer(config);
 
         // Draw hyperlink uri preview.
@@ -1025,6 +1194,16 @@ impl Display {
             let mut rects = Vec::with_capacity(damage.len());
             self.highlight_damage(&mut rects);
             self.renderer.draw_rects(&self.size_info, &metrics, rects);
+        }
+
+        if self.pending_screenshot {
+            self.pending_screenshot = false;
+            let path = screenshot::screenshot_path();
+            screenshot::capture(
+                &path,
+                self.size_info.width() as u32,
+                self.size_info.height() as u32,
+            );
         }
 
         // Clearing debug highlights from the previous frame requires full redraw.
@@ -1051,6 +1230,30 @@ impl Display {
         self.damage_tracker.debug = config.debug.highlight_damage;
         self.visual_bell.update_config(&config.bell);
         self.colors = List::from(&config.colors);
+    }
+
+    pub fn tab_at_position(&self, x: usize, y: usize) -> Option<TabHit> {
+        self.tab_hit_boxes.iter().find_map(|hit_box| {
+            let inside_x = (hit_box.x..hit_box.x + hit_box.width).contains(&(x as i32));
+            let inside_y = (hit_box.y..hit_box.y + hit_box.height).contains(&(y as i32));
+            (inside_x && inside_y).then_some(hit_box.hit)
+        })
+    }
+
+    /// Left edge and width of a tab's slot, select plus close area.
+    pub fn tab_bounds(&self, index: usize) -> Option<(f32, f32)> {
+        let mut left: Option<i32> = None;
+        let mut width = 0;
+        for hit_box in &self.tab_hit_boxes {
+            match hit_box.hit {
+                TabHit::Select(i) | TabHit::Close(i) if i == index => {
+                    left = Some(left.map_or(hit_box.x, |x| x.min(hit_box.x)));
+                    width += hit_box.width;
+                },
+                _ => (),
+            }
+        }
+        left.map(|x| (x as f32, width as f32))
     }
 
     /// Update the mouse/vi mode cursor hint highlighting.
@@ -1093,7 +1296,9 @@ impl Display {
         }
 
         // Find highlighted hint at mouse position.
-        let point = mouse.point(&self.size_info, term.grid().display_offset());
+        let mut point = mouse.point(&self.size_info, term.grid().display_offset());
+        point.column = cmp::min(point.column, term.last_column());
+        point.line = cmp::min(point.line, term.bottommost_line());
         let highlighted_hint = hint::highlighted_at(term, config, point, modifiers);
 
         // Update cursor shape.
@@ -1306,11 +1511,16 @@ impl Display {
     /// Draw current search regex.
     #[inline(never)]
     fn draw_search(&mut self, config: &UiConfig, text: &str) {
+        self.draw_footer_text(config, text, self.size_info.screen_lines());
+    }
+
+    #[inline(never)]
+    fn draw_footer_text(&mut self, config: &UiConfig, text: &str, line: usize) {
         // Assure text length is at least num_cols.
         let num_cols = self.size_info.columns();
         let text = format!("{text:<num_cols$}");
 
-        let point = Point::new(self.size_info.screen_lines(), Column(0));
+        let point = Point::new(line, Column(0));
 
         let fg = config.colors.footer_bar_foreground();
         let bg = config.colors.footer_bar_background();
@@ -1323,6 +1533,39 @@ impl Display {
             &self.size_info,
             &mut self.glyph_cache,
         );
+    }
+
+    fn draw_tab_bar_text(
+        &mut self,
+        point: Point<usize>,
+        fg: Rgb,
+        bg: Rgb,
+        bg_alpha: f32,
+        text: &str,
+        size_info: &SizeInfo,
+    ) {
+        let mut cells = Vec::with_capacity(text.chars().count());
+        let mut column = point.column.0;
+
+        for character in text.chars() {
+            let width = character.width().unwrap_or(1);
+            let flags = if width == 2 { Flags::WIDE_CHAR } else { Flags::empty() };
+
+            cells.push(crate::display::content::RenderableCell {
+                point: Point::new(point.line, Column(column)),
+                character,
+                extra: None,
+                flags,
+                bg_alpha,
+                fg,
+                bg,
+                underline: fg,
+            });
+
+            column += width;
+        }
+
+        self.renderer.draw_cells(size_info, &mut self.glyph_cache, cells.into_iter());
     }
 
     /// Draw render timer.
@@ -1456,6 +1699,38 @@ impl Display {
 
         scheduler.schedule(event, swap_timeout, false, timer_id);
     }
+}
+
+fn tab_bar_background_alpha(window_opacity: f32) -> f32 {
+    if window_opacity >= 1.0 { 1.0 } else { (window_opacity * 0.35).clamp(0.08, 0.35) }
+}
+
+fn blend_rgb(lhs: Rgb, rhs: Rgb, factor: f32) -> Rgb {
+    let factor = factor.clamp(0.0, 1.0);
+    let inv = 1.0 - factor;
+    let (lr, lg, lb) = lhs.as_tuple();
+    let (rr, rg, rb) = rhs.as_tuple();
+
+    Rgb::new(
+        (lr as f32 * inv + rr as f32 * factor).round() as u8,
+        (lg as f32 * inv + rg as f32 * factor).round() as u8,
+        (lb as f32 * inv + rb as f32 * factor).round() as u8,
+    )
+}
+
+fn darken_rgb(color: Rgb, factor: f32) -> Rgb {
+    let factor = factor.clamp(0.0, 1.0);
+    let (r, g, b) = color.as_tuple();
+    Rgb::new(
+        (r as f32 * factor).round() as u8,
+        (g as f32 * factor).round() as u8,
+        (b as f32 * factor).round() as u8,
+    )
+}
+
+fn format_search_prompt(label: &str, value: &str, max_width: usize) -> String {
+    let text = format!("{label}{value}_");
+    format!("{text:<max_width$}")
 }
 
 impl Drop for Display {
@@ -1631,4 +1906,28 @@ fn window_size(
     let height = (padding.1).mul_add(2., grid_height).floor();
 
     PhysicalSize::new(width as u32, height as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::term::test::{TermSize, mock_term};
+
+    use super::term_dimensions_changed;
+
+    #[test]
+    fn stale_terminal_dimensions_require_resize() {
+        let term = mock_term("test");
+        let size = TermSize::new(term.columns() + 1, term.screen_lines());
+
+        assert!(term_dimensions_changed(&term, &size));
+    }
+
+    #[test]
+    fn matching_terminal_dimensions_do_not_require_resize() {
+        let term = mock_term("test");
+        let size = TermSize::new(term.columns(), term.screen_lines());
+
+        assert!(!term_dimensions_changed(&term, &size));
+    }
 }

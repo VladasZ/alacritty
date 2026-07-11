@@ -329,12 +329,22 @@ impl Renderer {
     /// Set the viewport for cell rendering.
     #[inline]
     pub fn set_viewport(&self, size: &SizeInfo) {
+        self.set_shifted_viewport(size, 0.);
+    }
+
+    /// Set the cell rendering viewport moved right by `dx` pixels.
+    ///
+    /// The viewport keeps its normal dimensions, only the origin moves, so
+    /// glyphs render at the exact same scale as an unshifted pass. This lets
+    /// text land at a fractional column offset, used by the tab drag.
+    #[inline]
+    pub fn set_shifted_viewport(&self, size: &SizeInfo, dx: f32) {
         unsafe {
             gl::Viewport(
-                size.padding_x() as i32,
-                size.padding_y() as i32,
+                (size.padding_x() + dx) as i32,
+                size.padding_bottom_y() as i32,
                 size.width() as i32 - 2 * size.padding_x() as i32,
-                size.height() as i32 - 2 * size.padding_y() as i32,
+                size.height() as i32 - size.padding_y() as i32 - size.padding_bottom_y() as i32,
             );
         }
     }

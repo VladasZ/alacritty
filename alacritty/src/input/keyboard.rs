@@ -38,6 +38,21 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
         let text = key.text_with_all_modifiers().unwrap_or_default();
 
+        if self.ctx.window_close_confirmation_active() {
+            match key.logical_key.as_ref() {
+                Key::Named(NamedKey::Enter) => {
+                    self.ctx.confirm_window_close();
+                    return;
+                },
+                Key::Named(NamedKey::Escape) => {
+                    self.ctx.cancel_window_close();
+                    return;
+                },
+                _ if !Self::is_modifier_key(&key) => self.ctx.cancel_window_close(),
+                _ => (),
+            }
+        }
+
         // All key bindings are disabled while a hint is being selected.
         if self.ctx.display().hint_state.active() {
             for character in text.chars() {
@@ -50,6 +65,25 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let inline_state = self.ctx.inline_search_state();
         if inline_state.char_pending {
             self.ctx.inline_search_input(text);
+            return;
+        }
+
+        if self.ctx.tab_title_editor_active() {
+            match key.logical_key.as_ref() {
+                Key::Named(NamedKey::Enter) => self.ctx.confirm_tab_title(),
+                Key::Named(NamedKey::Escape) => self.ctx.cancel_tab_title(),
+                Key::Named(NamedKey::Backspace) => self.ctx.tab_title_input('\x7f'),
+                _ if mods.control_key()
+                    && matches!(key.logical_key.as_ref(), Key::Character("w")) =>
+                {
+                    self.ctx.tab_title_pop_word()
+                },
+                _ => {
+                    for character in text.chars() {
+                        self.ctx.tab_title_input(character);
+                    }
+                },
+            }
             return;
         }
 

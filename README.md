@@ -4,10 +4,60 @@
 
 <h1 align="center">Alacritty - A fast, cross-platform, OpenGL terminal emulator</h1>
 
-<p align="center">
-  <img alt="Alacritty - A fast, cross-platform, OpenGL terminal emulator"
-       src="https://raw.githubusercontent.com/alacritty/alacritty/master/extra/promo/alacritty-readme.png">
-</p>
+## This Fork
+
+This is a fork of Alacritty that adds browser style in-window tabs. The tab
+strip is drawn by the app, so it looks the same on macOS, Windows, and Linux.
+Each platform keeps its own window buttons. The macOS traffic lights stay
+native on the left. On Windows and Linux the strip draws its own minimize,
+maximize, and close buttons on the right.
+
+Tabs are on by default. Drag a tab to reorder it, the tab follows the pointer
+like a browser tab. Middle click a tab to close it, click the `+` for a new
+tab, and drag an empty part of the strip to move the window. When many tabs
+are open they shrink to fit.
+
+Upstream Alacritty has historically declined adding tabs by design. See
+[Tabs support in the terminal (#3129)](https://github.com/alacritty/alacritty/issues/3129),
+which is closed with the `F - wontfix` label.
+
+## Tabs Config
+
+Tabs are on by default with a browser look, so no config is needed. Colors,
+titles, and key bindings can still be customized.
+
+```toml
+[tabs]
+tab_title_template = "{index}: {title}"
+active_tab_foreground = "#1e1e2e"
+active_tab_background = "#cba6f7"
+inactive_tab_foreground = "#cdd6f4"
+inactive_tab_background = "#0b0b12"
+tab_bar_background = "#11111b"
+tab_bar_height = 2.4
+mouse = { enabled = true, hover = true }
+
+[keyboard]
+bindings = [
+  { key = "T", mods = "Super", action = "CreateNewTab" },
+  { key = "W", mods = "Super", action = "CloseTab" },
+  { key = "Right", mods = "Super", action = "SelectNextTab" },
+  { key = "Left", mods = "Super", action = "SelectPreviousTab" },
+  { key = ".", mods = "Super", action = "MoveTabForward" },
+  { key = ",", mods = "Super", action = "MoveTabBackward" },
+  { key = "T", mods = "Super|Alt", action = "SetTabTitle" },
+]
+```
+
+## Development Screenshots
+
+Send `SIGUSR1` to save a PNG of the window. This helps when iterating on the
+tab bar and needs no macOS screen recording permission. The path defaults to
+`/tmp/alacritty-screenshot.png` and can be set with `ALACRITTY_SCREENSHOT_PATH`.
+
+```sh
+kill -USR1 $(pgrep -x alacritty)
+```
 
 ## About
 
@@ -101,9 +151,9 @@ usecases.
 
 Alacritty has many great features, but not every feature from every other
 terminal. This could be for a number of reasons, but sometimes it's just not a
-good fit for Alacritty. This means you won't find things like tabs or splits
-(which are best left to a window manager or [terminal multiplexer][tmux]) nor
-niceties like a GUI config editor.
+good fit for Alacritty. This means you won't find things like splits (which are
+best left to a window manager or [terminal multiplexer][tmux]) nor niceties
+like a GUI config editor.
 
 [tmux]: https://github.com/tmux/tmux
 

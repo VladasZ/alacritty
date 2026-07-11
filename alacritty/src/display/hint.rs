@@ -13,8 +13,8 @@ use alacritty_terminal::term::cell::Hyperlink;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::{Term, TermMode};
 
-use crate::config::UiConfig;
 use crate::config::ui_config::{Hint, HintAction};
+use crate::config::UiConfig;
 
 /// Maximum number of linewraps followed outside of the viewport during search highlighting.
 pub const MAX_SEARCH_LINES: usize = 100;
@@ -426,6 +426,13 @@ pub fn highlighted_at<T>(
 ///
 /// This will only return contiguous cells, even if another hyperlink with the same ID exists.
 fn hyperlink_at<T>(term: &Term<T>, point: Point) -> Option<(Hyperlink, Match)> {
+    if point.line < term.topmost_line()
+        || point.line > term.bottommost_line()
+        || point.column > term.last_column()
+    {
+        return None;
+    }
+
     let hyperlink = term.grid()[point].hyperlink()?;
 
     let grid = term.grid();
@@ -699,5 +706,13 @@ mod tests {
 
         // The iterator should match everything in the viewport.
         assert_eq!(visible_regex_match_iter(&term, &mut regex).count(), 4096);
+    }
+
+    #[test]
+    fn hyperlink_at_ignores_out_of_bounds_points() {
+        let term = mock_term("abc");
+
+        assert_eq!(hyperlink_at(&term, Point::new(Line(0), Column(3))), None);
+        assert_eq!(hyperlink_at(&term, Point::new(Line(1), Column(0))), None);
     }
 }
