@@ -204,6 +204,16 @@ impl TerminalTab {
     }
 }
 
+impl Drop for TerminalTab {
+    fn drop(&mut self) {
+        // Stop the pty event loop so it drops the Pty and reaps its child. The
+        // loop only exits on Shutdown or pty EOF, so a tab removed from the UI
+        // while its shell still runs would otherwise leak the loop thread and
+        // the whole child process tree.
+        let _ = self.notifier.0.send(Msg::Shutdown);
+    }
+}
+
 fn displayed_title<'a>(
     custom_title: Option<&'a str>,
     terminal_title: Option<&'a str>,
@@ -1142,14 +1152,6 @@ impl WindowContext {
             } else if display_offset != 0 && origin_at_bottom {
                 terminal.scroll_display(Scroll::Delta(-1));
             }
-        }
-    }
-}
-
-impl Drop for WindowContext {
-    fn drop(&mut self) {
-        for tab in &mut self.tabs {
-            let _ = tab.notifier.0.send(Msg::Shutdown);
         }
     }
 }

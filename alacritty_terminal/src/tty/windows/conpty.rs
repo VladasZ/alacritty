@@ -6,18 +6,23 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::IntoRawHandle;
 use std::{mem, ptr};
 
-use windows_sys::Win32::Foundation::{HANDLE, S_OK};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
+};
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject,
 };
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::core::{HRESULT, PWSTR};
 use windows_sys::{s, w};
 
 use windows_sys::Win32::System::Threading::{
-    CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
     InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, PROCESS_INFORMATION,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, UpdateProcThreadAttribute,
 };
 
 use crate::event::{OnResize, WindowSize};
@@ -92,10 +97,23 @@ impl ConptyApi {
 pub struct Conpty {
     pub handle: HPCON,
     api: ConptyApi,
+    /// Job object holding the child and everything it spawns. Closing it kills
+    /// the whole tree. Null when the job could not be created.
+    job: HANDLE,
 }
 
 impl Drop for Conpty {
     fn drop(&mut self) {
+        // Kill the child process tree before closing the pseudoconsole. Closing
+        // the job handle triggers JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, which
+        // terminates the shell and every process it spawned. Windows has no
+        // SIGHUP, so without this a closed tab or window would orphan the tree.
+        // Doing it first also means the conout drain below sees EOF instead of
+        // blocking on a live child.
+        if !self.job.is_null() {
+            unsafe { CloseHandle(self.job) };
+        }
+
         // XXX: This will block until the conout pipe is drained. Will cause a deadlock if the
         // conout pipe has already been dropped by this point.
         //
@@ -204,7 +222,9 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     // Prepare child process creation arguments.
     let cmdline = win32_string(&cmdline(config));
     let cwd = config.working_directory.as_ref().map(win32_string);
-    let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT;
+    // Start the child suspended so it is placed in the job object before it can
+    // spawn anything, otherwise an early grandchild could escape the job.
+    let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED;
     let custom_env_block = convert_custom_env(&config.env);
     let custom_env_block_pointer = match &custom_env_block {
         Some(custom_env_block) => {
@@ -234,11 +254,39 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
         }
     }
 
+    // Confine the child and everything it spawns to a job object. Closing the
+    // last handle to the job terminates the whole tree, so a tab or window close
+    // reaps the shell and its descendants. Windows has no SIGHUP, and closing
+    // the pseudoconsole alone does not reap descendants.
+    let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+    if !job.is_null() {
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            AssignProcessToJobObject(job, proc_info.hProcess);
+        }
+    } else {
+        warn!("could not create job object, child process tree may leak on close");
+    }
+
+    // Release the suspended child now that the job is in place, then drop the
+    // main thread handle we no longer need.
+    unsafe {
+        ResumeThread(proc_info.hThread);
+        CloseHandle(proc_info.hThread);
+    }
+
     let conin = UnblockedWriter::new(conin, PIPE_CAPACITY);
     let conout = UnblockedReader::new(conout, PIPE_CAPACITY);
 
     let child_watcher = ChildExitWatcher::new(proc_info.hProcess)?;
-    let conpty = Conpty { handle: pty_handle as HPCON, api };
+    let conpty = Conpty { handle: pty_handle as HPCON, api, job };
 
     Ok(Pty::new(conpty, conout, conin, child_watcher))
 }
