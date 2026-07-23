@@ -1514,6 +1514,11 @@ mod tests {
                     click_state: $initial_state,
                     last_click_button: $initial_button,
                     last_click_timestamp: Instant::now() - $input_delay,
+                    // Away from the window edges. The default 0, 0 sits inside
+                    // the resize border, where a left press starts a window
+                    // resize and needs a real window the mock cannot give.
+                    x: 10,
+                    y: 10,
                     ..Mouse::default()
                 };
 
