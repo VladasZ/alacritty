@@ -35,3 +35,20 @@ jobs:
         run: rustup update && rustup target add x86_64-apple-darwin
       - name: Build
         run: cargo build --target=x86_64-apple-darwin
+  # Upstream never tested linux here, it has no linux binary to release. The
+  # fork ships one, so the build has to be covered before a release tag.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y cmake pkg-config libfreetype6-dev libfontconfig1-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev python3
+      - name: Stable
+        run: cargo test
+      - name: Clippy
+        run: |
+          rustup component add clippy
+          cargo clippy --all-targets

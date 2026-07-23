@@ -1,94 +1,260 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+    tags:
+      # The fork's own tag scheme. A plain 'v*' would also match the 160 upstream
+      # release tags this fork inherited, so every one of them would start a run.
+      - 'fork-*'
+
+permissions:
+  contents: write
 
 env:
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   CARGO_TERM_COLOR: always
+  # conpty.dll and its matching OpenConsole.exe both ship in this one nuget
+  # package, so their versions always stay in step. The thing repo pins the same
+  # version in shell/rs/shared/src/alacritty.rs.
+  CONPTY_NUGET_VER: 1.24.260512001
 
 jobs:
-  macos:
-    runs-on: macos-latest
-
+  prepare:
+    name: Prepare tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: brew install scdoc
-      - name: Install ARM target
-        run: rustup update && rustup target add aarch64-apple-darwin && rustup target add x86_64-apple-darwin
-      - name: Test
-        run: cargo test --release --target=x86_64-apple-darwin
-      - name: Build ARM
-        run: cargo build --release --target=aarch64-apple-darwin
-      - name: Make DMG
-        run: make dmg-universal
-      - name: Upload Application
-        run: |
-          mv ./target/release/osx/Alacritty.dmg ./Alacritty-${GITHUB_REF##*/}.dmg
-          ./.github/workflows/upload_asset.sh ./Alacritty-${GITHUB_REF##*/}.dmg $GITHUB_TOKEN
+      - uses: actions/checkout@v7
 
-  windows:
-    runs-on: windows-latest
-
-    defaults:
-      run:
+      - name: Pick the fork tag
+        id: pick
         shell: bash
+        run: |
+          set -euo pipefail
 
-    steps:
-      - uses: actions/checkout@v4
-      - name: Test
-        run: cargo test --release
-      - name: Build
-        run: cargo build --release
-      - name: Upload portable executable
-        run: |
-          cp ./target/release/alacritty.exe ./Alacritty-${GITHUB_REF##*/}-portable.exe
-          ./.github/workflows/upload_asset.sh \
-            ./Alacritty-${GITHUB_REF##*/}-portable.exe $GITHUB_TOKEN
-      - name: Install WiX
-        run: dotnet tool install --global wix --version 4.0.5
-      - name: Create msi installer
-        run: |
-          wix extension add WixToolset.UI.wixext/4.0.5 WixToolset.Util.wixext/4.0.5
-          wix build -arch "x64" -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
-          -out "./Alacritty-${GITHUB_REF##*/}-installer.msi" "alacritty/windows/wix/alacritty.wxs"
-      - name: Upload msi installer
-        run: |
-          ./.github/workflows/upload_asset.sh \
-            ./Alacritty-${GITHUB_REF##*/}-installer.msi $GITHUB_TOKEN
+          # Upstream owns the version in the manifest and the fork is rebased
+          # onto each upstream release, so the fork must never bump it. It
+          # numbers its own builds on top of that version instead, and the
+          # counter restarts by itself after a rebase onto a newer release.
+          ver=$(grep -m1 '^version = ' alacritty/Cargo.toml | cut -d'"' -f2)
+
+          # A pushed tag is the manual escape hatch, the number is already set.
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            case "$GITHUB_REF_NAME" in
+              "fork-$ver-"*) ;;
+              *)
+                echo "tag $GITHUB_REF_NAME does not match the crate version $ver" >&2
+                exit 1
+                ;;
+            esac
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "releasing the pushed tag $GITHUB_REF_NAME"
+            exit 0
+          fi
+
+          # The trailing true keeps the first release alive. With no tag yet the
+          # grep matches nothing and its exit 1 would end the run under pipefail.
+          last=$(git ls-remote --tags origin "fork-$ver-*" \
+            | sed 's|.*refs/tags/||' \
+            | grep -v '\^{}' \
+            | sed "s|^fork-$ver-||" \
+            | sort -n \
+            | tail -1 || true)
+          tag="fork-$ver-$(( ${last:-0} + 1 ))"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$tag"
+          git push origin "refs/tags/$tag"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tagged $tag"
 
   linux:
-    runs-on: ubuntu-latest
-
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux
+            os: ubuntu-22.04
+          - target: aarch64-linux
+            os: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install cmake pkg-config libfreetype6-dev libfontconfig1-dev \
+          sudo apt install -y cmake pkg-config libfreetype6-dev libfontconfig1-dev \
             libxcb-xfixes0-dev libxkbcommon-dev python3 scdoc
+
       - name: Test
         run: cargo test --release
-      - name: Generate manpages
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          scdoc < extra/man/alacritty.1.scd | gzip -c > "./alacritty.1.gz"
-          scdoc < extra/man/alacritty-msg.1.scd | gzip -c > "./alacritty-msg.1.gz"
-          scdoc < extra/man/alacritty.5.scd | gzip -c > "./alacritty.5.gz"
-          scdoc < extra/man/alacritty-bindings.5.scd | gzip -c > "./alacritty-bindings.5.gz"
-          scdoc < extra/man/alacritty-escapes.7.scd | gzip -c > "./alacritty-escapes.7.gz"
-      - name: Upload Assets
+          set -euo pipefail
+          out=alacritty
+          mkdir -p "$out/completions" "$out/man"
+          cp target/release/alacritty "$out/"
+          # Under its source name, the thing installer writes its own desktop
+          # entry and picks the icon out of the tarball by this path.
+          cp extra/logo/alacritty-term.svg "$out/"
+          cp extra/linux/Alacritty.desktop extra/alacritty.info "$out/"
+          cp extra/completions/_alacritty extra/completions/alacritty.bash \
+            extra/completions/alacritty.fish "$out/completions/"
+          for page in alacritty.1 alacritty-msg.1 alacritty.5 \
+            alacritty-bindings.5 alacritty-escapes.7; do
+            scdoc < "extra/man/$page.scd" | gzip -c > "$out/man/$page.gz"
+          done
+          tar -czf "Alacritty-$TAG-${{ matrix.target }}.tar.gz" "$out"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: Alacritty-*.tar.gz
+          if-no-files-found: error
+
+  macos:
+    name: Build universal macOS
+    needs: prepare
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Install dependencies
+        run: brew install scdoc
+
+      - name: Install targets
+        run: rustup update && rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build the universal app and dmg
+        run: make dmg-universal
+
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          # Without this macOS tar writes an AppleDouble ._ file next to every
+          # entry of the bundle.
+          COPYFILE_DISABLE: 1
         run: |
-          mv ./extra/logo/alacritty-term.svg ./Alacritty.svg
-          ./.github/workflows/upload_asset.sh ./Alacritty.svg $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./alacritty.1.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./alacritty-msg.1.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./alacritty.5.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./alacritty-bindings.5.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./alacritty-escapes.7.gz $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/completions/alacritty.bash $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/completions/alacritty.fish $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/completions/_alacritty $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/linux/Alacritty.desktop $GITHUB_TOKEN
-          ./.github/workflows/upload_asset.sh ./extra/alacritty.info $GITHUB_TOKEN
+          set -euo pipefail
+          # Only the bundle, the dmg step leaves an /Applications symlink and the
+          # dmg itself in the same folder.
+          tar -czf "Alacritty-$TAG-macos.tar.gz" -C target/release/osx Alacritty.app
+          mv target/release/osx/Alacritty.dmg "Alacritty-$TAG.dmg"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: |
+            Alacritty-*.tar.gz
+            Alacritty-*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-windows
+            os: windows-2025
+            arch: x64
+          - target: aarch64-windows
+            os: windows-11-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Test
+        run: cargo test --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package with conpty
+        shell: pwsh
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # The ConPTY built into Windows 10 never forwards mouse input to
+          # console apps, so the wheel and clicks are dead in every full screen
+          # TUI. Alacritty loads this pair in place of the OS one when it sits
+          # next to the exe, see ConptyApi::load_conpty.
+          $ver = $env:CONPTY_NUGET_VER
+          $base = 'https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty'
+          $url = "$base/$ver/microsoft.windows.console.conpty.$ver.nupkg"
+          Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile conpty.zip
+          Expand-Archive -Path conpty.zip -DestinationPath conpty -Force
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/alacritty.exe dist/
+          Copy-Item "conpty/runtimes/win-${{ matrix.arch }}/native/conpty.dll" dist/
+          Copy-Item "conpty/build/native/runtimes/${{ matrix.arch }}/OpenConsole.exe" dist/
+
+          $asset = "Alacritty-$env:TAG-${{ matrix.target }}.zip"
+          Compress-Archive -Path dist/* -DestinationPath $asset -Force
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: Alacritty-*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [prepare, linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Write checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          sha256sum Alacritty-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            assets/Alacritty-* assets/SHA256SUMS
