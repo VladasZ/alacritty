@@ -106,7 +106,10 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
-          out=alacritty
+          # Staged under dist, since the repo root already holds a directory
+          # named alacritty, the crate itself. Staging straight into that name
+          # tars the whole source tree.
+          out=dist/alacritty
           mkdir -p "$out/completions" "$out/man"
           cp target/release/alacritty "$out/"
           # Under its source name, the thing installer writes its own desktop
@@ -119,7 +122,7 @@ jobs:
             alacritty-bindings.5 alacritty-escapes.7; do
             scdoc < "extra/man/$page.scd" | gzip -c > "$out/man/$page.gz"
           done
-          tar -czf "Alacritty-$TAG-${{ matrix.target }}.tar.gz" "$out"
+          tar -czf "Alacritty-$TAG-${{ matrix.target }}.tar.gz" -C dist alacritty
 
       - uses: actions/upload-artifact@v7
         with:
