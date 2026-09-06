@@ -339,10 +339,20 @@ pub struct TabBarLayout {
     pub title_editor_lines: usize,
 }
 
+/// One slot in the tab strip.
+pub enum TabEntry {
+    Open {
+        title: String,
+        active: bool,
+    },
+    /// A closed tab whose shell still runs, shown as a small restore button.
+    Closed,
+}
+
 /// Tab strip content for one frame.
 #[derive(Copy, Clone)]
 pub struct TabBarContent<'a> {
-    pub titles: &'a [(String, bool)],
+    pub entries: &'a [TabEntry],
     pub title_editor: Option<&'a str>,
 }
 
@@ -473,6 +483,8 @@ pub enum TabHit {
     Select(usize),
     /// Close the tab at this index.
     Close(usize),
+    /// Bring back the closed tab at this index.
+    Restore(usize),
     /// Open a new tab.
     New,
     /// Minimize the window.
@@ -530,7 +542,7 @@ impl Display {
         let rasterizer = Rasterizer::new()?;
 
         let font_size = config.font.size().scale(scale_factor);
-        debug!("Loading \"{}\" font", &config.font.normal().family);
+        debug!("Loading \"{}\" font", config.font.normal().family);
         let font = config.font.clone().with_size(font_size);
         let mut glyph_cache = GlyphCache::new(rasterizer, &font)?;
 
@@ -1163,7 +1175,7 @@ impl Display {
         }
 
         self.tab_hit_boxes.clear();
-        if config.tabs.display_tab_bar(tab_bar.titles.len()) {
+        if config.tabs.display_tab_bar(tab_bar.entries.len()) {
             let line = match config.tabs.tab_bar_edge {
                 TabBarEdge::Top => 0,
                 TabBarEdge::Bottom => {
@@ -1174,7 +1186,7 @@ impl Display {
                     size_info.screen_lines() + search_lines + message_lines
                 },
             };
-            self.draw_tab_bar(config, tab_bar.titles, line);
+            self.draw_tab_bar(config, tab_bar.entries, line);
         }
 
         self.draw_render_timer(config);
@@ -1246,7 +1258,7 @@ impl Display {
         let mut width = 0;
         for hit_box in &self.tab_hit_boxes {
             match hit_box.hit {
-                TabHit::Select(i) | TabHit::Close(i) if i == index => {
+                TabHit::Select(i) | TabHit::Close(i) | TabHit::Restore(i) if i == index => {
                     left = Some(left.map_or(hit_box.x, |x| x.min(hit_box.x)));
                     width += hit_box.width;
                 },

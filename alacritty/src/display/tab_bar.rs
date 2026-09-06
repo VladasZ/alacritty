@@ -15,7 +15,8 @@ use crate::renderer::rects::RenderRect;
 use crate::string::{ShortenDirection, StrShortener};
 
 use super::{
-    Display, SHORTENER, TabHit, TabHitBox, blend_rgb, darken_rgb, tab_bar_background_alpha,
+    Display, SHORTENER, TabEntry, TabHit, TabHitBox, blend_rgb, darken_rgb,
+    tab_bar_background_alpha,
 };
 
 /// Smallest tab width, in cells, so short titles still look even.
@@ -26,6 +27,8 @@ const MIN_TAB_SHRINK: usize = 7;
 const CLOSE_CELLS: usize = 3;
 /// Cells for the new-tab button, " + ".
 const NEW_TAB_CELLS: usize = 3;
+/// Cells for a closed tab, which shrinks to just its restore button.
+const STUB_CELLS: usize = 3;
 /// Empty cells between two tabs.
 const TAB_GAP: usize = 1;
 /// Width kept clear on the left for the macOS traffic lights, in points.
@@ -44,6 +47,7 @@ struct TabLayout {
     span: usize,
     label: String,
     active: bool,
+    closed: bool,
 }
 
 /// Width of a label in terminal cells.
@@ -58,12 +62,7 @@ fn centering_offset(layout: &TabLayout) -> usize {
 }
 
 impl Display {
-    pub(super) fn draw_tab_bar(
-        &mut self,
-        config: &UiConfig,
-        tab_titles: &[(String, bool)],
-        line: usize,
-    ) {
+    pub(super) fn draw_tab_bar(&mut self, config: &UiConfig, entries: &[TabEntry], line: usize) {
         let ch = self.size_info.cell_height();
         let band_height = ch * config.tabs.tab_bar_height.as_f32();
         let text_inset = (band_height - ch) / 2.0;
@@ -129,8 +128,12 @@ impl Display {
         // Natural width per tab, as wide as its full title needs. The only
         // title cap is the user's tab_title_max_length, 0 means unlimited.
         let max_title = config.tabs.tab_title_max_length;
-        let mut tabs: Vec<(usize, bool, String, usize)> = Vec::new();
-        for (index, (title, active)) in tab_titles.iter().enumerate() {
+        let mut tabs: Vec<(usize, bool, bool, String, usize)> = Vec::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let TabEntry::Open { title, active } = entry else {
+                tabs.push((index, false, true, String::new(), STUB_CELLS));
+                continue;
+            };
             let title: String = if max_title > 0 {
                 StrShortener::new(title, max_title, ShortenDirection::Right, Some(SHORTENER))
                     .collect()
@@ -139,7 +142,7 @@ impl Display {
             };
             let label = format!(" {title}");
             let span = (label_cells(&label) + CLOSE_CELLS).max(MIN_TAB_CELLS);
-            tabs.push((index, *active, label, span));
+            tabs.push((index, *active, false, label, span));
         }
 
         // When the tabs overflow the strip, cap the widest tabs first so
@@ -149,13 +152,13 @@ impl Display {
         let gaps = TAB_GAP * tab_count.saturating_sub(1);
         let available = tab_area_cols.saturating_sub(start_col + NEW_TAB_CELLS + 1);
         let budget = available.saturating_sub(gaps);
-        let total: usize = tabs.iter().map(|tab| tab.3).sum();
+        let total: usize = tabs.iter().map(|tab| tab.4).sum();
         let cap = (tab_count > 0 && total > budget).then(|| {
             let mut lo = MIN_TAB_SHRINK;
-            let mut hi = tabs.iter().map(|tab| tab.3).max().unwrap_or(lo).max(lo);
+            let mut hi = tabs.iter().map(|tab| tab.4).max().unwrap_or(lo).max(lo);
             while lo < hi {
                 let mid = (lo + hi).div_ceil(2);
-                let capped: usize = tabs.iter().map(|tab| tab.3.min(mid)).sum();
+                let capped: usize = tabs.iter().map(|tab| tab.4.min(mid)).sum();
                 if capped <= budget {
                     lo = mid;
                 } else {
@@ -168,7 +171,7 @@ impl Display {
         // Lay tabs out first so the rects and the text agree on positions.
         let mut layouts: Vec<TabLayout> = Vec::new();
         let mut column = start_col;
-        for (index, active, mut label, natural_span) in tabs {
+        for (index, active, closed, mut label, natural_span) in tabs {
             let span = cap.map_or(natural_span, |cap| natural_span.min(cap));
             if column + span >= tab_area_cols {
                 break;
@@ -179,7 +182,7 @@ impl Display {
                 label = StrShortener::new(&label, fit, ShortenDirection::Right, Some(SHORTENER))
                     .collect();
             }
-            layouts.push(TabLayout { index, start: column, span, label, active });
+            layouts.push(TabLayout { index, start: column, span, label, active, closed });
             column += span + TAB_GAP;
         }
         let new_tab_col = column;
@@ -200,6 +203,9 @@ impl Display {
         let hovered = if floating.is_some() { None } else { self.hovered_tab };
         let hover_bg = blend_rgb(inactive_bg, active_bg, 0.5);
         let close_hover_fg = Rgb::new(0xec, 0x5f, 0x5f);
+        let stub_hover_bg = Rgb::new(0xd4, 0x4a, 0x4a);
+        let stub_bg = blend_rgb(inactive_bg, stub_hover_bg, 0.6);
+        let stub_fg = Rgb::new(0xf6, 0xf6, 0xf6);
 
         // Rect pass: bar background, rounded tab backgrounds, hit boxes.
         let mut rects =
@@ -207,7 +213,9 @@ impl Display {
         for layout in &layouts {
             let tab_hovered = hovered == Some(TabHit::Select(layout.index))
                 || hovered == Some(TabHit::Close(layout.index));
-            let tab_bg = if layout.active {
+            let tab_bg = if layout.closed {
+                if hovered == Some(TabHit::Restore(layout.index)) { stub_hover_bg } else { stub_bg }
+            } else if layout.active {
                 active_bg
             } else if tab_hovered {
                 hover_bg
@@ -233,6 +241,17 @@ impl Display {
                     rects.push(RenderRect::new(x, ry, cut, 1.0, bar_bg, alpha));
                     rects.push(RenderRect::new(x + w - cut, ry, cut, 1.0, bar_bg, alpha));
                 }
+            }
+
+            if layout.closed {
+                self.tab_hit_boxes.push(TabHitBox {
+                    hit: TabHit::Restore(layout.index),
+                    x: x as i32,
+                    y,
+                    width: w as i32,
+                    height: bar_height,
+                });
+                continue;
             }
 
             let close_start = layout.start + layout.span - CLOSE_CELLS;
@@ -265,6 +284,22 @@ impl Display {
         // Text pass: labels, close buttons, new-tab button.
         for layout in &layouts {
             if floating.is_some_and(|(index, _)| index == layout.index) {
+                continue;
+            }
+            if layout.closed {
+                let bg = if hovered == Some(TabHit::Restore(layout.index)) {
+                    stub_hover_bg
+                } else {
+                    stub_bg
+                };
+                self.draw_tab_bar_text(
+                    Point::new(line, Column(layout.start + 1)),
+                    stub_fg,
+                    blend_rgb(base_bg, bg, alpha),
+                    alpha,
+                    "\u{21ba}",
+                    &size_info,
+                );
                 continue;
             }
             let tab_hovered = hovered == Some(TabHit::Select(layout.index))

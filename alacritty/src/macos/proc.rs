@@ -71,8 +71,7 @@ pub fn cwd(pid: c_int) -> Result<PathBuf, Error> {
 /// Executable basename of the given process, like "zsh" or "vim".
 pub fn name(pid: c_int) -> Result<String, Error> {
     let mut buf = vec![0u8; sys::PROC_PIDPATHINFO_MAXSIZE];
-    let len =
-        unsafe { sys::proc_pidpath(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
+    let len = unsafe { sys::proc_pidpath(pid, buf.as_mut_ptr() as *mut c_void, buf.len() as u32) };
     if len <= 0 {
         return Err(io::Error::last_os_error().into());
     }

@@ -732,6 +732,14 @@ of open tabs is at least *tab_bar_min_tabs*.
 
 	Default: _0_
 
+*close_grace_period* = _<integer>_
+
+	Seconds a closed tab stays in the tab bar as a small restore button while
+	its shell keeps running. Clicking the button brings the tab back with all
+	its output. A value of _0_ closes tabs at once.
+
+	Default: _20_
+
 *active_tab_foreground* = _"#RRGGBB"_ | _"None"_
 
 	Foreground color for the active tab.

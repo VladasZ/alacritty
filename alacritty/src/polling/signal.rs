@@ -2,8 +2,8 @@
 
 use std::io::{Error as IoError, Read};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use signal_hook::consts::{SIGINT, SIGTERM, SIGUSR1};
 use signal_hook::flag;

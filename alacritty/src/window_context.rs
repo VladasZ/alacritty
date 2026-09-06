@@ -35,11 +35,11 @@ use alacritty_terminal::tty;
 use crate::cli::{ParsedOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::UiConfig;
-use crate::config::tabs::{TabBarEdge, TabSwitchStrategy};
+use crate::config::tabs::TabBarEdge;
 #[cfg(not(windows))]
 use crate::daemon::foreground_process_path;
 use crate::display::window::Window;
-use crate::display::{Display, TabBarContent, TabBarLayout};
+use crate::display::{Display, TabBarContent, TabBarLayout, TabEntry};
 use crate::event::{
     ActionContext, Event, EventProxy, EventType, InlineSearchState, Mouse, SearchState, TabAction,
     TabId, TouchPurpose,
@@ -49,6 +49,8 @@ use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::{Message, MessageBuffer, MessageType};
 use crate::scheduler::Scheduler;
 use crate::{input, renderer};
+
+mod closed_tabs;
 
 #[cfg(not(windows))]
 fn foreground_process_name(master_fd: RawFd, shell_pid: u32) -> Option<String> {
@@ -92,6 +94,8 @@ struct TerminalTab {
     master_fd: RawFd,
     #[cfg(not(windows))]
     shell_pid: u32,
+    /// Set while the tab is closed but its shell still runs, see `closed_tabs`.
+    closed_at: Option<Instant>,
 }
 
 impl TerminalTab {
@@ -155,6 +159,7 @@ impl TerminalTab {
             inline_search_state: Default::default(),
             message_buffer: Default::default(),
             search_state: Default::default(),
+            closed_at: None,
         })
     }
 
@@ -237,6 +242,8 @@ pub struct WindowContext {
     pub dirty: bool,
     event_queue: Vec<WinitEvent<Event>>,
     tabs: Vec<TerminalTab>,
+    /// Shown instead of a tab while every tab of the window is closed.
+    blank: TerminalTab,
     active_tab: usize,
     next_tab_id: u64,
     last_active_tab_id: Option<TabId>,
@@ -258,10 +265,6 @@ impl WindowContext {
         &self.tabs[self.active_tab]
     }
 
-    fn active_tab_mut(&mut self) -> &mut TerminalTab {
-        &mut self.tabs[self.active_tab]
-    }
-
     fn tab_index(&self, tab_id: Option<TabId>) -> Option<usize> {
         match tab_id {
             Some(tab_id) => self.tabs.iter().position(|tab| tab.id == tab_id),
@@ -278,11 +281,14 @@ impl WindowContext {
     }
 
     fn refresh_window_title(&mut self) {
-        let title = self.active_tab().display_title().to_owned();
+        let title = self.shown_tab().display_title().to_owned();
         self.display.window.set_title(title);
     }
 
     fn start_tab_title_editor(&mut self) {
+        if self.shown_index().is_none() {
+            return;
+        }
         let tab = self.active_tab();
         self.tab_title_editor = Some(TabTitleEditor {
             tab_id: tab.id,
@@ -420,10 +426,12 @@ impl WindowContext {
     }
 
     fn sync_focus(&mut self) {
+        let shown = self.shown_index();
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             let mut terminal = tab.terminal.lock();
-            terminal.is_focused = self.focused && index == self.active_tab;
+            terminal.is_focused = self.focused && shown == Some(index);
         }
+        self.blank.terminal.lock().is_focused = self.focused && shown.is_none();
     }
 
     fn set_active_tab(&mut self, index: usize) {
@@ -432,15 +440,22 @@ impl WindowContext {
         }
 
         let index = index.min(self.tabs.len() - 1);
-        if self.active_tab == index {
+        if self.active_tab == index || self.is_closed(index) {
             return;
         }
 
         self.last_active_tab_id = Some(self.tabs[self.active_tab].id);
         self.active_tab = index;
-        let config = self.config.clone();
-        self.active_tab_mut().refresh_detected_title(&config);
         self.cancel_tab_title_editor();
+        self.refresh_active_tab();
+    }
+
+    /// Bring the window in line with a change of the active slot.
+    fn refresh_active_tab(&mut self) {
+        let config = self.config.clone();
+        if let Some(index) = self.shown_index() {
+            self.tabs[index].refresh_detected_title(&config);
+        }
         self.display.clear_hint_highlights();
         self.sync_focus();
         self.refresh_window_title();
@@ -504,12 +519,6 @@ impl WindowContext {
         Ok(())
     }
 
-    fn close_active_tab(&mut self) {
-        self.cancel_window_close_confirmation();
-        let tab = self.active_tab_mut();
-        tab.terminal.lock().exit();
-    }
-
     fn move_active_tab(&mut self, delta: isize) {
         if self.tabs.len() < 2 {
             return;
@@ -544,58 +553,6 @@ impl WindowContext {
         if self.tab_index(tab_id) == Some(self.active_tab) {
             self.dirty = true;
         }
-    }
-
-    pub fn handle_tab_exit(&mut self, tab_id: Option<TabId>) -> bool {
-        if self.display.window.hold {
-            return false;
-        }
-
-        self.cancel_window_close_confirmation();
-
-        let Some(index) = self.tab_index(tab_id) else {
-            return false;
-        };
-        let closing_tab_id = self.tabs[index].id;
-        let next_active_id = match self.config.tabs.tab_switch_strategy {
-            TabSwitchStrategy::Previous => self.last_active_tab_id.filter(|tab_id| {
-                self.tabs.iter().any(|tab| tab.id == *tab_id && tab.id != closing_tab_id)
-            }),
-            TabSwitchStrategy::Left => {
-                index.checked_sub(1).and_then(|index| self.tabs.get(index)).map(|tab| tab.id)
-            },
-            TabSwitchStrategy::Right => self.tabs.get(index + 1).map(|tab| tab.id),
-            TabSwitchStrategy::Last => self.tabs.last().map(|tab| tab.id),
-        };
-
-        self.tabs.remove(index);
-        if self.tab_title_editor.as_ref().is_some_and(|editor| editor.tab_id == closing_tab_id) {
-            self.tab_title_editor = None;
-        }
-
-        if self.tabs.is_empty() {
-            return true;
-        }
-
-        self.active_tab = next_active_id
-            .and_then(|tab_id| self.tabs.iter().position(|tab| tab.id == tab_id))
-            .unwrap_or_else(|| {
-                self.active_tab
-                    .min(self.tabs.len() - 1)
-                    .saturating_sub(usize::from(index < self.active_tab))
-            });
-
-        let config = self.config.clone();
-        self.active_tab_mut().refresh_detected_title(&config);
-
-        self.sync_focus();
-        self.refresh_window_title();
-        self.display.damage_tracker.frame().mark_fully_damaged();
-        self.display.damage_tracker.next_frame().mark_fully_damaged();
-        self.display.pending_update.dirty = true;
-        self.dirty = true;
-
-        false
     }
 
     pub fn clear_config_messages(&mut self, target: &str) {
@@ -722,6 +679,7 @@ impl WindowContext {
             &options,
             &proxy,
         )?;
+        let blank = TerminalTab::blank(display.window.id(), display.size_info, &config, &proxy)?;
 
         // Create context for the Alacritty window.
         Ok(WindowContext {
@@ -736,6 +694,7 @@ impl WindowContext {
             touch: Default::default(),
             dirty: Default::default(),
             tabs: vec![first_tab],
+            blank,
             active_tab: 0,
             next_tab_id: 1,
             last_active_tab_id: None,
@@ -883,18 +842,22 @@ impl WindowContext {
         }
 
         // Redraw the window.
-        let tab_titles: Vec<_> = self
+        let entries: Vec<_> = self
             .tabs
             .iter()
             .enumerate()
             .map(|(index, tab)| {
+                if tab.closed_at.is_some() {
+                    return TabEntry::Closed;
+                }
                 let active = index == self.active_tab;
-                (self.render_tab_title(index, tab, active), active)
+                TabEntry::Open { title: self.render_tab_title(index, tab, active), active }
             })
             .collect();
-        let active_tab = self.active_tab;
-        let (display, tabs, config) = (&mut self.display, &mut self.tabs, &self.config);
-        let active_tab = &mut tabs[active_tab];
+        let active_index = self.active_tab;
+        let (display, tabs, blank, config) =
+            (&mut self.display, &mut self.tabs, &mut self.blank, &self.config);
+        let active_tab = Self::shown_slot(tabs, blank, active_index);
         let terminal = active_tab.terminal.lock();
         display.draw(
             terminal,
@@ -903,7 +866,7 @@ impl WindowContext {
             config,
             &mut active_tab.search_state,
             TabBarContent {
-                titles: &tab_titles,
+                entries: &entries,
                 title_editor: self.tab_title_editor.as_ref().map(|editor| editor.value.as_str()),
             },
         );
@@ -934,8 +897,8 @@ impl WindowContext {
             },
         }
 
-        let old_is_searching = self.active_tab().search_state.history_index.is_some();
-        let queued_events: Vec<_> = self.event_queue.drain(..).collect();
+        let old_is_searching = self.shown_tab().search_state.history_index.is_some();
+        let queued_events = mem::take(&mut self.event_queue);
 
         for event in queued_events {
             match &event {
@@ -953,27 +916,29 @@ impl WindowContext {
                                 log::error!("Could not create tab: {err:?}");
                             }
                         },
-                        TabAction::Close => self.close_active_tab(),
+                        TabAction::Close => self.close_active_tab(scheduler),
+                        TabAction::Restore(index) => self.restore_tab(*index),
+                        TabAction::Expire { tab_id, closed_at } => {
+                            self.expire_tab(*tab_id, *closed_at);
+                        },
                         #[cfg(not(target_os = "macos"))]
                         TabAction::RequestClose => self.request_window_close(),
                         TabAction::ConfirmWindowClose => self.confirm_window_close(),
                         TabAction::CancelWindowClose => self.cancel_window_close_confirmation(),
                         TabAction::SelectNext => {
-                            if !self.tabs.is_empty() {
-                                self.set_active_tab((self.active_tab + 1) % self.tabs.len());
+                            if let Some(next) = self.live_neighbor(true) {
+                                self.set_active_tab(next);
                             }
                         },
                         TabAction::SelectPrevious => {
-                            if !self.tabs.is_empty() {
-                                let next =
-                                    (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
-                                self.set_active_tab(next);
+                            if let Some(previous) = self.live_neighbor(false) {
+                                self.set_active_tab(previous);
                             }
                         },
                         TabAction::Select(index) => self.set_active_tab(*index),
                         TabAction::SelectLast => {
-                            if !self.tabs.is_empty() {
-                                self.set_active_tab(self.tabs.len() - 1);
+                            if let Some(last) = self.last_live_tab() {
+                                self.set_active_tab(last);
                             }
                         },
                         TabAction::MoveForward => self.move_active_tab(1),
@@ -989,14 +954,24 @@ impl WindowContext {
                 _ => (),
             }
 
-            let tab_index = match &event {
-                WinitEvent::UserEvent(Event { tab_id, .. }) => {
-                    self.tab_index(*tab_id).unwrap_or(self.active_tab)
+            // An event addressed to a tab goes to that tab, closed or not.
+            // Everything else goes to the tab that fills the window.
+            let target = match &event {
+                WinitEvent::UserEvent(Event { tab_id: Some(tab_id), .. }) => {
+                    self.tabs.iter().position(|tab| tab.id == *tab_id)
                 },
-                _ => self.active_tab,
+                _ => None,
             };
-            let is_active_tab = tab_index == self.active_tab;
-            let tab = &mut self.tabs[tab_index];
+            let active_index = self.active_tab;
+            let (tabs, blank) = (&mut self.tabs, &mut self.blank);
+            let (tab, is_active_tab) = match target {
+                Some(index) => {
+                    let tab = &mut tabs[index];
+                    let is_active = index == active_index && tab.closed_at.is_none();
+                    (tab, is_active)
+                },
+                None => (Self::shown_slot(tabs, blank, active_index), true),
+            };
             let mut terminal = tab.terminal.lock();
 
             let context = ActionContext {
@@ -1045,8 +1020,9 @@ impl WindowContext {
             };
             self.display.pending_update.set_tab_bar(tab_bar);
             let active_index = self.active_tab;
-            let (display, tabs, config) = (&mut self.display, &mut self.tabs, &self.config);
-            let active_tab = &mut tabs[active_index];
+            let (display, tabs, blank, config) =
+                (&mut self.display, &mut self.tabs, &mut self.blank, &self.config);
+            let active_tab = Self::shown_slot(tabs, blank, active_index);
             let mut terminal = active_tab.terminal.lock();
             Self::submit_display_update(
                 &mut terminal,
@@ -1062,8 +1038,9 @@ impl WindowContext {
 
         if self.dirty || self.mouse.hint_highlight_dirty {
             let active_index = self.active_tab;
-            let (display, tabs, config) = (&mut self.display, &mut self.tabs, &self.config);
-            let active_tab = &mut tabs[active_index];
+            let (display, tabs, blank, config) =
+                (&mut self.display, &mut self.tabs, &mut self.blank, &self.config);
+            let active_tab = Self::shown_slot(tabs, blank, active_index);
             let terminal = active_tab.terminal.lock();
             self.dirty |= display.update_highlighted_hints(
                 &terminal,

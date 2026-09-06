@@ -647,6 +647,11 @@ pub enum TabAction {
     CancelTitle,
     TitleInput(char),
     TitlePopWord,
+    Restore(usize),
+    Expire {
+        tab_id: TabId,
+        closed_at: Instant,
+    },
 }
 
 /// Regex search state.
@@ -980,6 +985,13 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         let _ = self
             .event_proxy
             .send_event(Event::new(EventType::Tab(TabAction::Close), self.display.window.id()));
+    }
+
+    fn restore_tab(&mut self, index: usize) {
+        let _ = self.event_proxy.send_event(Event::new(
+            EventType::Tab(TabAction::Restore(index)),
+            self.display.window.id(),
+        ));
     }
 
     #[cfg(not(target_os = "macos"))]

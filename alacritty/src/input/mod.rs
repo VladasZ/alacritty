@@ -110,6 +110,7 @@ pub trait ActionContext<T: EventListener> {
     fn spawn_new_instance(&mut self) {}
     fn create_new_tab(&mut self) {}
     fn close_tab(&mut self) {}
+    fn restore_tab(&mut self, _index: usize) {}
     #[cfg(not(target_os = "macos"))]
     fn close_window(&mut self) {}
     fn select_next_tab(&mut self) {}
@@ -380,7 +381,7 @@ impl<T: EventListener> Execute<T> for Action {
             Action::Minimize => ctx.window().set_minimized(true),
             Action::Quit => {
                 ctx.window().hold = false;
-                ctx.terminal_mut().exit();
+                ctx.close_tab();
             },
             Action::IncreaseFontSize => ctx.change_font_size(FONT_SIZE_STEP),
             Action::DecreaseFontSize => ctx.change_font_size(-FONT_SIZE_STEP),
@@ -1109,6 +1110,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                         self.ctx.select_tab_at_index(index);
                         self.ctx.close_tab();
                     },
+                    TabHit::Restore(index) => self.ctx.restore_tab(index),
                     TabHit::New => self.ctx.create_new_tab(),
                     #[cfg(not(target_os = "macos"))]
                     TabHit::Minimize => self.ctx.window().set_minimized(true),

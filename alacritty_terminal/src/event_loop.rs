@@ -387,6 +387,13 @@ pub struct EventLoopSender {
 }
 
 impl EventLoopSender {
+    /// A sender with no event loop behind it, so every send fails.
+    pub fn disconnected() -> io::Result<Self> {
+        let (sender, receiver) = mpsc::channel();
+        drop(receiver);
+        Ok(Self { sender, poller: Arc::new(Poller::new()?) })
+    }
+
     pub fn send(&self, msg: Msg) -> Result<(), EventLoopSendError> {
         self.sender.send(msg).map_err(EventLoopSendError::Send)?;
         self.poller.notify().map_err(EventLoopSendError::Io)
