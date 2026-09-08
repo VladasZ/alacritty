@@ -848,7 +848,7 @@ impl WindowContext {
             .enumerate()
             .map(|(index, tab)| {
                 if tab.closed_at.is_some() {
-                    return TabEntry::Closed;
+                    return TabEntry::Closed { title: self.render_tab_title(index, tab, false) };
                 }
                 let active = index == self.active_tab;
                 TabEntry::Open { title: self.render_tab_title(index, tab, active), active }

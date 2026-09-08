@@ -27,8 +27,6 @@ const MIN_TAB_SHRINK: usize = 7;
 const CLOSE_CELLS: usize = 3;
 /// Cells for the new-tab button, " + ".
 const NEW_TAB_CELLS: usize = 3;
-/// Cells for a closed tab, which shrinks to just its restore button.
-const STUB_CELLS: usize = 3;
 /// Empty cells between two tabs.
 const TAB_GAP: usize = 1;
 /// Width kept clear on the left for the macOS traffic lights, in points.
@@ -130,9 +128,9 @@ impl Display {
         let max_title = config.tabs.tab_title_max_length;
         let mut tabs: Vec<(usize, bool, bool, String, usize)> = Vec::new();
         for (index, entry) in entries.iter().enumerate() {
-            let TabEntry::Open { title, active } = entry else {
-                tabs.push((index, false, true, String::new(), STUB_CELLS));
-                continue;
+            let (title, active, closed) = match entry {
+                TabEntry::Open { title, active } => (title, *active, false),
+                TabEntry::Closed { title } => (title, false, true),
             };
             let title: String = if max_title > 0 {
                 StrShortener::new(title, max_title, ShortenDirection::Right, Some(SHORTENER))
@@ -142,7 +140,7 @@ impl Display {
             };
             let label = format!(" {title}");
             let span = (label_cells(&label) + CLOSE_CELLS).max(MIN_TAB_CELLS);
-            tabs.push((index, *active, false, label, span));
+            tabs.push((index, active, closed, label, span));
         }
 
         // When the tabs overflow the strip, cap the widest tabs first so
@@ -292,10 +290,19 @@ impl Display {
                 } else {
                     stub_bg
                 };
+                let rendered_bg = blend_rgb(base_bg, bg, alpha);
                 self.draw_tab_bar_text(
-                    Point::new(line, Column(layout.start + 1)),
+                    Point::new(line, Column(layout.start + centering_offset(layout))),
                     stub_fg,
-                    blend_rgb(base_bg, bg, alpha),
+                    rendered_bg,
+                    alpha,
+                    &layout.label,
+                    &size_info,
+                );
+                self.draw_tab_bar_text(
+                    Point::new(line, Column(layout.start + layout.span - 2)),
+                    stub_fg,
+                    rendered_bg,
                     alpha,
                     "\u{21ba}",
                     &size_info,

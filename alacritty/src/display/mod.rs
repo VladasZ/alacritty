@@ -345,8 +345,11 @@ pub enum TabEntry {
         title: String,
         active: bool,
     },
-    /// A closed tab whose shell still runs, shown as a small restore button.
-    Closed,
+    /// A closed tab whose shell still runs, drawn red at full width with a
+    /// restore button in place of the close button.
+    Closed {
+        title: String,
+    },
 }
 
 /// Tab strip content for one frame.

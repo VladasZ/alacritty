@@ -17,12 +17,13 @@ like a browser tab. Middle click a tab to close it, click the `+` for a new
 tab, and drag an empty part of the strip to move the window. When many tabs
 are open they shrink to fit.
 
-Closing a tab does not kill its shell right away. The tab shrinks to a small
-red restore button and its process keeps running. Click the button to get the
-tab back with everything it printed meanwhile. After `close_grace_period`
-seconds, 20 by default, the button disappears and the process is killed. This
-holds for the last tab of a window too, the window stays open until the
-button expires. Set the period to `0` for instant close.
+Closing a tab does not kill its shell right away. The tab turns red, keeps its
+width and title, and shows a restore button where the close button was, while
+its process keeps running. Click anywhere on the tab to get it back with
+everything it printed meanwhile. After `close_grace_period` seconds, 20 by
+default, the tab disappears and the process is killed. This holds for the last
+tab of a window too, the window stays open until the tab expires. Set the
+period to `0` for instant close.
 
 Upstream Alacritty has historically declined adding tabs by design. See
 [Tabs support in the terminal (#3129)](https://github.com/alacritty/alacritty/issues/3129),

@@ -1,10 +1,10 @@
 //! Closed tabs that stay in the strip for a grace period.
 //!
-//! Closing a tab does not kill its shell right away. The tab shrinks to a
-//! small restore button while its pty keeps running untouched, so a click on
-//! the button brings it back with everything it printed meanwhile. When the
-//! grace period ends the tab exits for real, through the same path a shell
-//! exiting on its own takes.
+//! Closing a tab does not kill its shell right away. The tab turns red and
+//! keeps its width, with a restore button where the close button was, while
+//! its pty keeps running untouched, so a click on the tab brings it back with
+//! everything it printed meanwhile. When the grace period ends the tab exits
+//! for real, through the same path a shell exiting on its own takes.
 
 use std::error::Error;
 use std::sync::Arc;
