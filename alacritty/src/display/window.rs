@@ -405,6 +405,7 @@ impl Window {
     ///
     /// The tab strip uses this to drop the macOS traffic-light inset, since the
     /// lights are hidden while fullscreen.
+    #[cfg(target_os = "macos")]
     pub fn is_fullscreen(&self) -> bool {
         if self.window.fullscreen().is_some() {
             return true;

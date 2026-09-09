@@ -7,6 +7,13 @@ use gl_generator::{Api, Fallbacks, GlobalGenerator, Profile, Registry};
 
 fn main() {
     let mut version = String::from(env!("CARGO_PKG_VERSION"));
+    // The release workflow passes the fork tag, `fork-0.17.0-6`. It shows in
+    // `--version` and drives the self update. A dev build has none.
+    println!("cargo:rerun-if-env-changed=ALACRITTY_FORK_TAG");
+    if let Some(tag) = env::var("ALACRITTY_FORK_TAG").ok().filter(|tag| !tag.is_empty()) {
+        version = format!("{version} {tag}");
+        println!("cargo:rustc-env=ALACRITTY_FORK_TAG={tag}");
+    }
     if let Some(commit_hash) = commit_hash() {
         version = format!("{version} ({commit_hash})");
     }

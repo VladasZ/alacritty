@@ -109,6 +109,7 @@ pub trait ActionContext<T: EventListener> {
     fn terminal_mut(&mut self) -> &mut Term<T>;
     fn spawn_new_instance(&mut self) {}
     fn create_new_tab(&mut self) {}
+    fn install_update(&mut self) {}
     fn close_tab(&mut self) {}
     fn restore_tab(&mut self, _index: usize) {}
     #[cfg(not(target_os = "macos"))]
@@ -1112,6 +1113,7 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     },
                     TabHit::Restore(index) => self.ctx.restore_tab(index),
                     TabHit::New => self.ctx.create_new_tab(),
+                    TabHit::Update => self.ctx.install_update(),
                     #[cfg(not(target_os = "macos"))]
                     TabHit::Minimize => self.ctx.window().set_minimized(true),
                     #[cfg(not(target_os = "macos"))]

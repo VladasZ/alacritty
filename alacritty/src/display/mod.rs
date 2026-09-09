@@ -57,6 +57,7 @@ use crate::renderer::rects::{RenderLine, RenderLines, RenderRect};
 use crate::renderer::{self, GlyphCache, Renderer, platform};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::string::{ShortenDirection, StrShortener};
+use crate::updater::UpdateState;
 
 pub mod color;
 pub mod content;
@@ -357,6 +358,7 @@ pub enum TabEntry {
 pub struct TabBarContent<'a> {
     pub entries: &'a [TabEntry],
     pub title_editor: Option<&'a str>,
+    pub update: &'a UpdateState,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
@@ -490,6 +492,8 @@ pub enum TabHit {
     Restore(usize),
     /// Open a new tab.
     New,
+    /// Install the offered self update.
+    Update,
     /// Minimize the window.
     #[cfg(not(target_os = "macos"))]
     Minimize,
@@ -1189,7 +1193,7 @@ impl Display {
                     size_info.screen_lines() + search_lines + message_lines
                 },
             };
-            self.draw_tab_bar(config, tab_bar.entries, line);
+            self.draw_tab_bar(config, tab_bar.entries, tab_bar.update, line);
         }
 
         self.draw_render_timer(config);

@@ -63,6 +63,7 @@ use crate::message_bar::{Message, MessageBuffer};
 #[cfg(unix)]
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
+use crate::updater::{self, UpdateState};
 use crate::window_context::WindowContext;
 
 /// Duration after the last user input until an unlimited search is performed.
@@ -98,6 +99,8 @@ pub struct Processor {
     global_ipc_options: ParsedOptions,
     cli_options: CliOptions,
     config: Rc<UiConfig>,
+    /// Self update progress, one for the whole process, drawn in every tab strip.
+    update: UpdateState,
 }
 
 impl Processor {
@@ -110,6 +113,8 @@ impl Processor {
         let proxy = event_loop.create_proxy();
         let scheduler = Scheduler::new(proxy.clone());
         let initial_window_options = Some(cli_options.window_options.clone());
+
+        updater::start(proxy.clone());
 
         // Disable all device events, since we don't care about them.
         event_loop.listen_device_events(DeviceEvents::Never);
@@ -138,6 +143,7 @@ impl Processor {
             config: Rc::new(config),
             clipboard,
             windows: Default::default(),
+            update: UpdateState::Idle,
             #[cfg(unix)]
             global_ipc_options: Default::default(),
             config_monitor,
@@ -238,6 +244,16 @@ impl Processor {
                 | WindowEvent::Moved(_)
         )
     }
+
+    /// The update chip changed, every window draws it.
+    fn redraw_all_windows(&mut self) {
+        for window_context in self.windows.values_mut() {
+            window_context.dirty = true;
+            if window_context.display.window.has_frame {
+                window_context.display.window.request_redraw();
+            }
+        }
+    }
 }
 
 impl ApplicationHandler<Event> for Processor {
@@ -302,7 +318,7 @@ impl ApplicationHandler<Event> for Processor {
         );
 
         if is_redraw {
-            window_context.draw(&mut self.scheduler);
+            window_context.draw(&mut self.scheduler, &self.update);
         }
     }
 
@@ -428,6 +444,17 @@ impl ApplicationHandler<Event> for Processor {
                 if let Some(window_context) = id.and_then(|id| self.windows.get_mut(&id)) {
                     window_context.display.pending_screenshot = true;
                     window_context.display.window.request_redraw();
+                }
+            },
+            (EventType::Update(state), _) => {
+                self.update = state;
+                self.redraw_all_windows();
+            },
+            (EventType::InstallUpdate, _) => {
+                if let UpdateState::Available(release) = &self.update {
+                    updater::spawn_install(release.clone(), self.proxy.clone());
+                    self.update = UpdateState::Downloading(0);
+                    self.redraw_all_windows();
                 }
             },
             // Process events affecting all windows.
@@ -616,6 +643,10 @@ pub enum EventType {
     /// Save the focused window's framebuffer to a PNG, triggered by SIGUSR1.
     #[cfg(unix)]
     Screenshot,
+    /// The self update moved, from the check or install thread.
+    Update(UpdateState),
+    /// The update chip was clicked while a release is offered.
+    InstallUpdate,
     Frame,
 }
 
@@ -973,6 +1004,12 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         }
 
         self.spawn_daemon(&alacritty, &args);
+    }
+
+    fn install_update(&mut self) {
+        if self.event_proxy.send_event(Event::new(EventType::InstallUpdate, None)).is_err() {
+            warn!("Update install request dropped, the event loop is gone");
+        }
     }
 
     fn create_new_tab(&mut self) {
@@ -2184,7 +2221,7 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 | EventType::IpcGetConfig(..)
                 | EventType::Shutdown
                 | EventType::Screenshot => (),
-                EventType::Tab(_) => (),
+                EventType::Tab(_) | EventType::Update(_) | EventType::InstallUpdate => (),
                 EventType::Message(_)
                 | EventType::ConfigReload(_)
                 | EventType::CreateWindow(_)

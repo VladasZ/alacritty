@@ -75,6 +75,8 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: prepare
     runs-on: ${{ matrix.os }}
+    env:
+      ALACRITTY_FORK_TAG: ${{ needs.prepare.outputs.tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -134,6 +136,8 @@ jobs:
     name: Build universal macOS
     needs: prepare
     runs-on: macos-15
+    env:
+      ALACRITTY_FORK_TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -177,6 +181,8 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: prepare
     runs-on: ${{ matrix.os }}
+    env:
+      ALACRITTY_FORK_TAG: ${{ needs.prepare.outputs.tag }}
     strategy:
       fail-fast: false
       matrix:

@@ -13,6 +13,7 @@ use crate::config::tabs::TabBarEdge;
 use crate::display::color::Rgb;
 use crate::renderer::rects::RenderRect;
 use crate::string::{ShortenDirection, StrShortener};
+use crate::updater::UpdateState;
 
 use super::{
     Display, SHORTENER, TabEntry, TabHit, TabHitBox, blend_rgb, darken_rgb,
@@ -60,7 +61,13 @@ fn centering_offset(layout: &TabLayout) -> usize {
 }
 
 impl Display {
-    pub(super) fn draw_tab_bar(&mut self, config: &UiConfig, entries: &[TabEntry], line: usize) {
+    pub(super) fn draw_tab_bar(
+        &mut self,
+        config: &UiConfig,
+        entries: &[TabEntry],
+        update: &UpdateState,
+        line: usize,
+    ) {
         let ch = self.size_info.cell_height();
         let band_height = ch * config.tabs.tab_bar_height.as_f32();
         let text_inset = (band_height - ch) / 2.0;
@@ -118,9 +125,18 @@ impl Display {
 
         // Cells kept clear on the right for our own window controls.
         #[cfg(not(target_os = "macos"))]
-        let right_reserved = if num_cols > WINDOW_BTN_CELLS * 3 { WINDOW_BTN_CELLS * 3 } else { 0 };
+        let controls_cells = if num_cols > WINDOW_BTN_CELLS * 3 { WINDOW_BTN_CELLS * 3 } else { 0 };
         #[cfg(target_os = "macos")]
-        let right_reserved = 0;
+        let controls_cells = 0;
+
+        // The update chip sits left of the controls. It only shows when a tab
+        // and the new-tab button still fit beside it.
+        let chip_label = update.label().map(|label| format!(" {label} "));
+        let chip_cells = chip_label.as_deref().map_or(0, label_cells);
+        let chip_fits = chip_cells > 0
+            && num_cols > controls_cells + chip_cells + TAB_GAP + MIN_TAB_CELLS + NEW_TAB_CELLS + 1;
+        let chip_col = chip_fits.then(|| num_cols - controls_cells - chip_cells - TAB_GAP);
+        let right_reserved = controls_cells + if chip_fits { chip_cells + TAB_GAP } else { 0 };
         let tab_area_cols = num_cols.saturating_sub(right_reserved);
 
         // Natural width per tab, as wide as its full title needs. The only
@@ -353,10 +369,57 @@ impl Display {
             );
         }
 
+        // The update chip, a pill in green while a release is offered or
+        // installed, muted while it downloads, red when it failed.
+        if let (Some(label), Some(col)) = (&chip_label, chip_col) {
+            let green = Rgb::new(0x10, 0xb9, 0x81);
+            let chip_hovered = hovered == Some(TabHit::Update);
+            let (fg, chip_bg) = match update {
+                UpdateState::Available(_) | UpdateState::Restart(_) => {
+                    let tint = if chip_hovered { 0.35 } else { 0.18 };
+                    (green, blend_rgb(bar_bg, green, tint))
+                },
+                UpdateState::Failed => (close_hover_fg, blend_rgb(bar_bg, close_hover_fg, 0.18)),
+                _ => (inactive_fg, blend_rgb(bar_bg, active_bg, 0.5)),
+            };
+            let x = pad_x + cw * col as f32;
+            let w = cw * chip_cells as f32;
+            let rendered_bg = blend_rgb(base_bg, chip_bg, alpha);
+            let mut rects = vec![RenderRect::new(x, tab_top, w, tab_height, rendered_bg, alpha)];
+            // All four corners are cut with the strip color, so it reads as a pill.
+            for row in 0..radius {
+                let cut = (radius - row) as f32;
+                let top = tab_top + row as f32;
+                let bottom = tab_top + tab_height - 1.0 - row as f32;
+                for ry in [top, bottom] {
+                    rects.push(RenderRect::new(x, ry, cut, 1.0, bar_bg, alpha));
+                    rects.push(RenderRect::new(x + w - cut, ry, cut, 1.0, bar_bg, alpha));
+                }
+            }
+            self.renderer.draw_rects(&size_info, &metrics, rects);
+            self.draw_tab_bar_text(
+                Point::new(line, Column(col)),
+                fg,
+                rendered_bg,
+                alpha,
+                label,
+                &size_info,
+            );
+            if update.clickable() {
+                self.tab_hit_boxes.push(TabHitBox {
+                    hit: TabHit::Update,
+                    x: x as i32,
+                    y,
+                    width: w as i32,
+                    height: bar_height,
+                });
+            }
+        }
+
         // Window controls on the right and a drag region over the whole strip.
         // Only on platforms where we removed the native title bar.
         #[cfg(not(target_os = "macos"))]
-        if right_reserved > 0 {
+        if controls_cells > 0 {
             let controls = [
                 (num_cols - WINDOW_BTN_CELLS * 3, TabHit::Minimize, " \u{2013}  "),
                 (num_cols - WINDOW_BTN_CELLS * 2, TabHit::MaximizeToggle, " \u{25a1}  "),

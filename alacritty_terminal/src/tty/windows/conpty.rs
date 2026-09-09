@@ -259,7 +259,9 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     // reaps the shell and its descendants. Windows has no SIGHUP, and closing
     // the pseudoconsole alone does not reap descendants.
     let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
-    if !job.is_null() {
+    if job.is_null() {
+        warn!("could not create job object, child process tree may leak on close");
+    } else {
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         unsafe {
@@ -271,8 +273,6 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
             );
             AssignProcessToJobObject(job, proc_info.hProcess);
         }
-    } else {
-        warn!("could not create job object, child process tree may leak on close");
     }
 
     // Release the suspended child now that the job is in place, then drop the

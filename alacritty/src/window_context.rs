@@ -6,7 +6,6 @@ use std::io::Write;
 use std::mem;
 #[cfg(not(windows))]
 use std::os::unix::io::{AsRawFd, RawFd};
-#[cfg(not(windows))]
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -48,6 +47,7 @@ use crate::event::{
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 use crate::message_bar::{Message, MessageBuffer, MessageType};
 use crate::scheduler::Scheduler;
+use crate::updater::UpdateState;
 use crate::{input, renderer};
 
 mod closed_tabs;
@@ -465,6 +465,22 @@ impl WindowContext {
         self.dirty = true;
     }
 
+    /// The directory of the active tab's shell, so a new tab opens where the
+    /// user is. Windows has no cheap way to ask a process for it.
+    #[cfg(not(windows))]
+    fn active_tab_cwd(&self) -> Option<PathBuf> {
+        process_cwd(self.active_tab().shell_pid).filter(|path| path.is_dir()).or_else(|| {
+            foreground_process_path(self.active_tab().master_fd, self.active_tab().shell_pid)
+                .ok()
+                .filter(|path| path.is_dir())
+        })
+    }
+
+    #[cfg(windows)]
+    fn active_tab_cwd(&self) -> Option<PathBuf> {
+        None
+    }
+
     fn create_tab(&mut self) -> Result<(), Box<dyn Error>> {
         self.cancel_window_close_confirmation();
 
@@ -472,16 +488,7 @@ impl WindowContext {
         self.next_tab_id += 1;
 
         let mut options = WindowOptions::default();
-        #[cfg(not(windows))]
-        if let Some(working_directory) =
-            process_cwd(self.active_tab().shell_pid).filter(|path| path.is_dir()).or_else(|| {
-                foreground_process_path(self.active_tab().master_fd, self.active_tab().shell_pid)
-                    .ok()
-                    .filter(|path| path.is_dir())
-            })
-        {
-            options.terminal_options.working_directory = Some(working_directory);
-        }
+        options.terminal_options.working_directory = self.active_tab_cwd();
         let tab = match TerminalTab::new(
             tab_id,
             self.display.window.id(),
@@ -818,7 +825,7 @@ impl WindowContext {
     }
 
     /// Draw the window.
-    pub fn draw(&mut self, scheduler: &mut Scheduler) {
+    pub fn draw(&mut self, scheduler: &mut Scheduler, update: &UpdateState) {
         self.display.window.requested_redraw = false;
 
         if self.occluded {
@@ -868,6 +875,7 @@ impl WindowContext {
             TabBarContent {
                 entries: &entries,
                 title_editor: self.tab_title_editor.as_ref().map(|editor| editor.value.as_str()),
+                update,
             },
         );
     }
@@ -1067,6 +1075,8 @@ impl WindowContext {
         self.display.window.id()
     }
 
+    /// Only the screenshot picks a window by focus, and that is unix only.
+    #[cfg(unix)]
     pub fn focused(&self) -> bool {
         self.focused
     }
