@@ -23,10 +23,11 @@ like a browser tab. Middle click a tab to close it, click the `+` for a new
 tab, and drag an empty part of the strip to move the window. When many tabs
 are open they shrink to fit.
 
-Closing a tab does not kill its shell right away. The tab turns red, keeps its
-width and title, and shows a restore button where the close button was, while
-its process keeps running. Click anywhere on the tab to get it back with
-everything it printed meanwhile. After `close_grace_period` seconds, 20 by
+Closing a tab does not kill its shell right away. The tab turns red, moves to
+the right end of the strip as a narrow tab with a restore button, and its
+process keeps running. Click anywhere on the tab to get it back in its old
+place with everything it printed meanwhile. When the strip is full the red
+tabs shrink first, down to the restore button alone, before the open tabs do. After `close_grace_period` seconds, 20 by
 default, the tab disappears and the process is killed. This holds for the last
 tab of a window too, the window stays open until the tab expires. Set the
 period to `0` for instant close.

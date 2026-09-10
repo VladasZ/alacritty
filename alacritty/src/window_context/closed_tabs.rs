@@ -1,10 +1,15 @@
 //! Closed tabs that stay in the strip for a grace period.
 //!
 //! Closing a tab does not kill its shell right away. The tab turns red and
-//! keeps its width, with a restore button where the close button was, while
-//! its pty keeps running untouched, so a click on the tab brings it back with
-//! everything it printed meanwhile. When the grace period ends the tab exits
-//! for real, through the same path a shell exiting on its own takes.
+//! moves to the right edge of the strip, narrower than an open tab, with a
+//! restore button where the close button was, while its pty keeps running
+//! untouched, so a click on the tab brings it back with everything it printed
+//! meanwhile. When the grace period ends the tab exits for real, through the
+//! same path a shell exiting on its own takes.
+//!
+//! Closed tabs always sit at the end of the tab list, in close order. The
+//! strip draws the list in order, so packing them at its right edge needs no
+//! second ordering, and the drag reorder keeps its neighbor math.
 
 use std::error::Error;
 use std::sync::Arc;
@@ -28,6 +33,15 @@ use super::{TerminalTab, WindowContext};
 
 /// Tab id of the blank terminal shown while every tab of a window is closed.
 const BLANK_TAB_ID: TabId = TabId(u64::MAX);
+
+/// State of a tab while it is closed but its shell still runs.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ClosedTab {
+    /// When the close happened. The expiry timer carries the same instant.
+    at: Instant,
+    /// Slot the tab had before the close, where a restore puts it back.
+    origin: usize,
+}
 
 /// Pick the tab to show when the tab at `from` goes away. Follows the switch
 /// strategy first, then falls back to the nearest open tab on either side.
@@ -75,14 +89,19 @@ impl TerminalTab {
             master_fd: -1,
             #[cfg(not(windows))]
             shell_pid: 0,
-            closed_at: None,
+            closed: None,
         })
     }
 }
 
 impl WindowContext {
     pub(super) fn is_closed(&self, index: usize) -> bool {
-        self.tabs[index].closed_at.is_some()
+        self.tabs[index].closed.is_some()
+    }
+
+    /// Number of open tabs, which is also the slot of the first closed tab.
+    pub(super) fn open_tab_count(&self) -> usize {
+        self.tabs.iter().filter(|tab| tab.closed.is_none()).count()
     }
 
     /// Index of the tab whose terminal fills the window. None while the
@@ -105,7 +124,7 @@ impl WindowContext {
         active: usize,
     ) -> &'a mut TerminalTab {
         match tabs.get_mut(active) {
-            Some(tab) if tab.closed_at.is_none() => tab,
+            Some(tab) if tab.closed.is_none() => tab,
             _ => blank,
         }
     }
@@ -125,11 +144,11 @@ impl WindowContext {
     }
 
     pub(super) fn last_live_tab(&self) -> Option<usize> {
-        self.tabs.iter().rposition(|tab| tab.closed_at.is_none())
+        self.tabs.iter().rposition(|tab| tab.closed.is_none())
     }
 
     fn next_live_tab(&self, from: usize) -> Option<usize> {
-        let closed: Vec<bool> = self.tabs.iter().map(|tab| tab.closed_at.is_some()).collect();
+        let closed: Vec<bool> = self.tabs.iter().map(|tab| tab.closed.is_some()).collect();
         let previous =
             self.last_active_tab_id.and_then(|id| self.tabs.iter().position(|tab| tab.id == id));
         pick_live_tab(&closed, from, self.config.tabs.tab_switch_strategy, previous)
@@ -149,11 +168,15 @@ impl WindowContext {
             return;
         }
 
+        let next_id = self.next_live_tab(index).map(|next| self.tabs[next].id);
         let closed_at = Instant::now();
-        let tab = &mut self.tabs[index];
-        tab.closed_at = Some(closed_at);
-        let window_id = self.display.window.id();
+        let mut tab = self.tabs.remove(index);
+        tab.closed = Some(ClosedTab { at: closed_at, origin: index });
         let expire = TabAction::Expire { tab_id: tab.id, closed_at };
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+
+        let window_id = self.display.window.id();
         scheduler.schedule(
             Event::new(EventType::Tab(expire), window_id),
             Duration::from_secs(grace),
@@ -161,7 +184,8 @@ impl WindowContext {
             TimerId::new(Topic::TabExpiry, window_id),
         );
 
-        match self.next_live_tab(index) {
+        let next = next_id.and_then(|id| self.tabs.iter().position(|tab| tab.id == id));
+        match next {
             Some(next) => self.set_active_tab(next),
             None => {
                 self.cancel_tab_title_editor();
@@ -171,17 +195,20 @@ impl WindowContext {
     }
 
     pub(super) fn restore_tab(&mut self, index: usize) {
-        let Some(tab) = self.tabs.get_mut(index) else { return };
-        if tab.closed_at.take().is_none() {
+        let Some(closed) = self.tabs.get_mut(index).and_then(|tab| tab.closed.take()) else {
             return;
-        }
+        };
 
-        if self.active_tab != index {
-            if !self.is_closed(self.active_tab) {
-                self.last_active_tab_id = Some(self.tabs[self.active_tab].id);
-            }
-            self.active_tab = index;
+        let previous = (self.active_tab != index && !self.is_closed(self.active_tab))
+            .then(|| self.tabs[self.active_tab].id);
+        let tab = self.tabs.remove(index);
+        let target = closed.origin.min(self.open_tab_count());
+        self.tabs.insert(target, tab);
+
+        if previous.is_some() {
+            self.last_active_tab_id = previous;
         }
+        self.active_tab = target;
         self.cancel_tab_title_editor();
         self.refresh_active_tab();
     }
@@ -191,7 +218,7 @@ impl WindowContext {
     /// that was restored and closed again does not cut the new period short.
     pub(super) fn expire_tab(&mut self, tab_id: TabId, closed_at: Instant) {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else { return };
-        if tab.closed_at != Some(closed_at) {
+        if tab.closed.map(|closed| closed.at) != Some(closed_at) {
             return;
         }
 

@@ -52,6 +52,8 @@ use crate::{input, renderer};
 
 mod closed_tabs;
 
+use closed_tabs::ClosedTab;
+
 #[cfg(not(windows))]
 fn foreground_process_name(master_fd: RawFd, shell_pid: u32) -> Option<String> {
     let mut pid = unsafe { libc::tcgetpgrp(master_fd) };
@@ -95,7 +97,7 @@ struct TerminalTab {
     #[cfg(not(windows))]
     shell_pid: u32,
     /// Set while the tab is closed but its shell still runs, see `closed_tabs`.
-    closed_at: Option<Instant>,
+    closed: Option<ClosedTab>,
 }
 
 impl TerminalTab {
@@ -159,7 +161,7 @@ impl TerminalTab {
             inline_search_state: Default::default(),
             message_buffer: Default::default(),
             search_state: Default::default(),
-            closed_at: None,
+            closed: None,
         })
     }
 
@@ -516,8 +518,12 @@ impl WindowContext {
             Err(err) => return Err(err),
         };
 
-        self.tabs.push(tab);
-        self.set_active_tab(self.tabs.len() - 1);
+        let index = self.open_tab_count();
+        self.tabs.insert(index, tab);
+        if !self.tabs.is_empty() && self.active_tab >= index {
+            self.active_tab += 1;
+        }
+        self.set_active_tab(index);
         self.display.damage_tracker.frame().mark_fully_damaged();
         self.display.damage_tracker.next_frame().mark_fully_damaged();
         self.display.pending_update.dirty = true;
@@ -538,7 +544,7 @@ impl WindowContext {
             (old_index + delta as usize).min(self.tabs.len() - 1)
         };
 
-        if new_index == old_index {
+        if new_index == old_index || self.is_closed(old_index) || self.is_closed(new_index) {
             return;
         }
 
@@ -854,7 +860,7 @@ impl WindowContext {
             .iter()
             .enumerate()
             .map(|(index, tab)| {
-                if tab.closed_at.is_some() {
+                if tab.closed.is_some() {
                     return TabEntry::Closed { title: self.render_tab_title(index, tab, false) };
                 }
                 let active = index == self.active_tab;
@@ -975,7 +981,7 @@ impl WindowContext {
             let (tab, is_active_tab) = match target {
                 Some(index) => {
                     let tab = &mut tabs[index];
-                    let is_active = index == active_index && tab.closed_at.is_none();
+                    let is_active = index == active_index && tab.closed.is_none();
                     (tab, is_active)
                 },
                 None => (Self::shown_slot(tabs, blank, active_index), true),

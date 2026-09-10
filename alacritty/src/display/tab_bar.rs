@@ -1,9 +1,10 @@
 //! Browser-style tab bar rendering and hit testing.
 //!
 //! Draws one strip of filled tabs with rounded top corners, each with a close
-//! button on the right, and a new-tab button at the end. On macOS the strip
-//! starts past the native traffic lights so the window looks like a browser,
-//! tabs beside the window controls.
+//! button on the right, and a new-tab button at the end. Closed tabs wait at
+//! the right edge, narrow and red, until their grace period ends. On macOS
+//! the strip starts past the native traffic lights so the window looks like
+//! a browser, tabs beside the window controls.
 
 use alacritty_terminal::index::{Column, Point};
 use unicode_width::UnicodeWidthChar;
@@ -26,6 +27,12 @@ const MIN_TAB_CELLS: usize = 12;
 const MIN_TAB_SHRINK: usize = 7;
 /// Cells reserved on the right of a tab for the close button.
 const CLOSE_CELLS: usize = 3;
+/// Width of a closed tab, in cells. Its title is cut to fit beside the
+/// restore button.
+const CLOSED_TAB_CELLS: usize = 10;
+/// Floor a closed tab shrinks to when the strip overflows, the restore
+/// button alone.
+const CLOSED_TAB_SHRINK: usize = 4;
 /// Cells for the new-tab button, " + ".
 const NEW_TAB_CELLS: usize = 3;
 /// Empty cells between two tabs.
@@ -58,6 +65,16 @@ fn label_cells(label: &str) -> usize {
 /// at its natural width, only labels shorter than the minimum tab width move.
 fn centering_offset(layout: &TabLayout) -> usize {
     (layout.span - CLOSE_CELLS).saturating_sub(label_cells(&layout.label)) / 2
+}
+
+/// Width of each closed tab, in cells. `available` is the strip room left
+/// for tabs, `open_cells` what the open tabs need at their natural width.
+fn closed_tab_span(open_cells: usize, closed_count: usize, available: usize) -> usize {
+    if closed_count == 0 {
+        return 0;
+    }
+    let spare = available.saturating_sub(open_cells) / closed_count;
+    spare.clamp(CLOSED_TAB_SHRINK, CLOSED_TAB_CELLS)
 }
 
 impl Display {
@@ -141,38 +158,55 @@ impl Display {
 
         // Natural width per tab, as wide as its full title needs. The only
         // title cap is the user's tab_title_max_length, 0 means unlimited.
+        // A closed tab has a fixed narrow width instead, its title cut to fit.
         let max_title = config.tabs.tab_title_max_length;
-        let mut tabs: Vec<(usize, bool, bool, String, usize)> = Vec::new();
+        let mut open: Vec<(usize, bool, String, usize)> = Vec::new();
+        let mut closed: Vec<(usize, String)> = Vec::new();
         for (index, entry) in entries.iter().enumerate() {
-            let (title, active, closed) = match entry {
-                TabEntry::Open { title, active } => (title, *active, false),
-                TabEntry::Closed { title } => (title, false, true),
-            };
-            let title: String = if max_title > 0 {
-                StrShortener::new(title, max_title, ShortenDirection::Right, Some(SHORTENER))
-                    .collect()
-            } else {
-                title.clone()
-            };
-            let label = format!(" {title}");
-            let span = (label_cells(&label) + CLOSE_CELLS).max(MIN_TAB_CELLS);
-            tabs.push((index, active, closed, label, span));
+            match entry {
+                TabEntry::Open { title, active } => {
+                    let title: String = if max_title > 0 {
+                        StrShortener::new(
+                            title,
+                            max_title,
+                            ShortenDirection::Right,
+                            Some(SHORTENER),
+                        )
+                        .collect()
+                    } else {
+                        title.clone()
+                    };
+                    let label = format!(" {title}");
+                    let span = (label_cells(&label) + CLOSE_CELLS).max(MIN_TAB_CELLS);
+                    open.push((index, *active, label, span));
+                },
+                TabEntry::Closed { title } => closed.push((index, format!(" {title}"))),
+            }
         }
 
-        // When the tabs overflow the strip, cap the widest tabs first so
-        // short tabs keep their natural width, like a browser. Binary search
-        // the largest cap that still fits the strip, down to a floor.
-        let tab_count = tabs.len();
-        let gaps = TAB_GAP * tab_count.saturating_sub(1);
-        let available = tab_area_cols.saturating_sub(start_col + NEW_TAB_CELLS + 1);
-        let budget = available.saturating_sub(gaps);
-        let total: usize = tabs.iter().map(|tab| tab.4).sum();
-        let cap = (tab_count > 0 && total > budget).then(|| {
+        // Closed tabs pack at the right edge of the strip, a gap away from
+        // the new-tab button. Open tabs keep their width first, so the closed
+        // ones shrink to their floor before any open tab gives up a cell.
+        let open_gaps = TAB_GAP * open.len().saturating_sub(1);
+        let closed_gaps = TAB_GAP * closed.len().saturating_sub(1);
+        let group_gap = if closed.is_empty() { 0 } else { TAB_GAP };
+        let available =
+            tab_area_cols.saturating_sub(start_col + NEW_TAB_CELLS + 1 + group_gap + closed_gaps);
+        let open_total: usize = open.iter().map(|tab| tab.3).sum();
+        let closed_span = closed_tab_span(open_total + open_gaps, closed.len(), available);
+        let closed_width = closed.len() * closed_span + closed_gaps;
+        let open_area_cols = tab_area_cols.saturating_sub(closed_width + group_gap);
+
+        // When the open tabs still overflow, cap the widest first so short
+        // tabs keep their natural width, like a browser. Binary search the
+        // largest cap that still fits the strip, down to a floor.
+        let budget = available.saturating_sub(open_gaps + closed.len() * closed_span);
+        let cap = (!open.is_empty() && open_total > budget).then(|| {
             let mut lo = MIN_TAB_SHRINK;
-            let mut hi = tabs.iter().map(|tab| tab.4).max().unwrap_or(lo).max(lo);
+            let mut hi = open.iter().map(|tab| tab.3).max().unwrap_or(lo).max(lo);
             while lo < hi {
                 let mid = (lo + hi).div_ceil(2);
-                let capped: usize = tabs.iter().map(|tab| tab.4.min(mid)).sum();
+                let capped: usize = open.iter().map(|tab| tab.3.min(mid)).sum();
                 if capped <= budget {
                     lo = mid;
                 } else {
@@ -185,9 +219,9 @@ impl Display {
         // Lay tabs out first so the rects and the text agree on positions.
         let mut layouts: Vec<TabLayout> = Vec::new();
         let mut column = start_col;
-        for (index, active, closed, mut label, natural_span) in tabs {
+        for (index, active, mut label, natural_span) in open {
             let span = cap.map_or(natural_span, |cap| natural_span.min(cap));
-            if column + span >= tab_area_cols {
+            if column + span >= open_area_cols {
                 break;
             }
             if span < natural_span {
@@ -196,16 +230,36 @@ impl Display {
                 label = StrShortener::new(&label, fit, ShortenDirection::Right, Some(SHORTENER))
                     .collect();
             }
-            layouts.push(TabLayout { index, start: column, span, label, active, closed });
+            layouts.push(TabLayout { index, start: column, span, label, active, closed: false });
             column += span + TAB_GAP;
         }
         let new_tab_col = column;
-        let show_new_tab = new_tab_col + NEW_TAB_CELLS < tab_area_cols;
+        let show_new_tab = new_tab_col + NEW_TAB_CELLS < open_area_cols;
+
+        let mut column = tab_area_cols.saturating_sub(closed_width);
+        for (index, label) in closed {
+            // At the floor only the restore button is left, so no title.
+            let fit = closed_span - CLOSE_CELLS;
+            let label = if fit > 1 {
+                StrShortener::new(&label, fit, ShortenDirection::Right, Some(SHORTENER)).collect()
+            } else {
+                String::new()
+            };
+            layouts.push(TabLayout {
+                index,
+                start: column,
+                span: closed_span,
+                label,
+                active: false,
+                closed: true,
+            });
+            column += closed_span + TAB_GAP;
+        }
 
         // A drag past the start threshold floats the pressed tab under the
         // pointer, leaving an empty slot where it would land.
         let strip_left = pad_x + cw * start_col as f32;
-        let strip_right = pad_x + cw * tab_area_cols as f32;
+        let strip_right = pad_x + cw * open_area_cols as f32;
         let floating = self.tab_drag.as_ref().filter(|drag| drag.active).and_then(|drag| {
             let layout = layouts.iter().find(|layout| layout.index == drag.index)?;
             let width = cw * layout.span as f32;
@@ -217,9 +271,9 @@ impl Display {
         let hovered = if floating.is_some() { None } else { self.hovered_tab };
         let hover_bg = blend_rgb(inactive_bg, active_bg, 0.5);
         let close_hover_fg = Rgb::new(0xec, 0x5f, 0x5f);
-        let stub_hover_bg = Rgb::new(0xd4, 0x4a, 0x4a);
-        let stub_bg = blend_rgb(inactive_bg, stub_hover_bg, 0.6);
-        let stub_fg = Rgb::new(0xf6, 0xf6, 0xf6);
+        let closed_hover_bg = Rgb::new(0xd4, 0x4a, 0x4a);
+        let closed_bg = blend_rgb(inactive_bg, closed_hover_bg, 0.6);
+        let closed_fg = Rgb::new(0xf6, 0xf6, 0xf6);
 
         // Rect pass: bar background, rounded tab backgrounds, hit boxes.
         let mut rects =
@@ -228,7 +282,11 @@ impl Display {
             let tab_hovered = hovered == Some(TabHit::Select(layout.index))
                 || hovered == Some(TabHit::Close(layout.index));
             let tab_bg = if layout.closed {
-                if hovered == Some(TabHit::Restore(layout.index)) { stub_hover_bg } else { stub_bg }
+                if hovered == Some(TabHit::Restore(layout.index)) {
+                    closed_hover_bg
+                } else {
+                    closed_bg
+                }
             } else if layout.active {
                 active_bg
             } else if tab_hovered {
@@ -302,14 +360,14 @@ impl Display {
             }
             if layout.closed {
                 let bg = if hovered == Some(TabHit::Restore(layout.index)) {
-                    stub_hover_bg
+                    closed_hover_bg
                 } else {
-                    stub_bg
+                    closed_bg
                 };
                 let rendered_bg = blend_rgb(base_bg, bg, alpha);
                 self.draw_tab_bar_text(
                     Point::new(line, Column(layout.start + centering_offset(layout))),
-                    stub_fg,
+                    closed_fg,
                     rendered_bg,
                     alpha,
                     &layout.label,
@@ -317,7 +375,7 @@ impl Display {
                 );
                 self.draw_tab_bar_text(
                     Point::new(line, Column(layout.start + layout.span - 2)),
-                    stub_fg,
+                    closed_fg,
                     rendered_bg,
                     alpha,
                     "\u{21ba}",
@@ -499,5 +557,18 @@ impl Display {
         }
 
         self.renderer.set_viewport(&self.size_info);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CLOSED_TAB_CELLS, CLOSED_TAB_SHRINK, closed_tab_span};
+
+    #[test]
+    fn closed_tabs_shrink_before_open_tabs_and_stop_at_the_floor() {
+        assert_eq!(closed_tab_span(20, 0, 40), 0);
+        assert_eq!(closed_tab_span(20, 1, 40), CLOSED_TAB_CELLS);
+        assert_eq!(closed_tab_span(34, 1, 40), 6);
+        assert_eq!(closed_tab_span(40, 2, 40), CLOSED_TAB_SHRINK);
     }
 }

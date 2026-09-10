@@ -743,9 +743,9 @@ of open tabs is at least *tab_bar_min_tabs*.
 
 *close_grace_period* = _<integer>_
 
-	Seconds a closed tab stays in the tab bar, drawn red with a restore button,
-	while its shell keeps running. Clicking the tab brings it back with all
-	its output. A value of _0_ closes tabs at once.
+	Seconds a closed tab stays at the right end of the tab bar, drawn red and
+	narrow with a restore button, while its shell keeps running. Clicking the
+	tab brings it back to its old place with all its output. A value of _0_ closes tabs at once.
 
 	Default: _20_
 

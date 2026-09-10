@@ -1270,7 +1270,7 @@ impl Display {
         let mut width = 0;
         for hit_box in &self.tab_hit_boxes {
             match hit_box.hit {
-                TabHit::Select(i) | TabHit::Close(i) | TabHit::Restore(i) if i == index => {
+                TabHit::Select(i) | TabHit::Close(i) if i == index => {
                     left = Some(left.map_or(hit_box.x, |x| x.min(hit_box.x)));
                     width += hit_box.width;
                 },
