@@ -405,7 +405,7 @@ impl Window {
     ///
     /// The tab strip uses this to drop the macOS traffic-light inset, since the
     /// lights are hidden while fullscreen.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub fn is_fullscreen(&self) -> bool {
         if self.window.fullscreen().is_some() {
             return true;
@@ -420,6 +420,11 @@ impl Window {
     /// Toggle the window's maximized state.
     pub fn toggle_maximized(&self) {
         self.set_maximized(!self.window.is_maximized());
+    }
+
+    #[cfg(windows)]
+    pub fn is_maximized(&self) -> bool {
+        self.window.is_maximized()
     }
 
     /// Begin an interactive drag of the window, used by the tab strip caption.

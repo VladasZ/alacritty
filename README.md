@@ -12,6 +12,12 @@ Each platform keeps its own window buttons. The macOS traffic lights stay
 native on the left. On Windows and Linux the strip draws its own minimize,
 maximize, and close buttons on the right.
 
+On Windows the removed title bar leaves no visible edge, so two windows on the
+same theme blend into each other where they overlap. The fork draws a thin
+frame along the window edges there, hidden while maximized or fullscreen. Its
+color is a mid gray mixed from the theme background and foreground, and
+`border_color` under `[window]` overrides it.
+
 Tabs are on by default. Drag a tab to reorder it, the tab follows the pointer
 like a browser tab. Middle click a tab to close it, click the `+` for a new
 tab, and drag an empty part of the strip to move the window. When many tabs

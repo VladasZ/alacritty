@@ -212,6 +212,7 @@ impl NoWindow for Command {
     }
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 fn old_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().map(|name| name.to_os_string()).unwrap_or_default();
     name.push(".old");
@@ -374,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(windows, target_os = "macos"))]
     fn old_path_appends_to_the_full_name() {
         let old = old_path(Path::new("/bin/alacritty.exe"));
         assert_eq!(old.file_name().unwrap(), "alacritty.exe.old");

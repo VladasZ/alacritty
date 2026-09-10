@@ -129,6 +129,15 @@ This section documents the *[window]* table of the configuration file.
 
 	Default: _"Full"_
 
+*border_color* = _"#RRGGBB"_ | _"None"_
+
+	Color of the frame drawn along the window edges. Windows only, where the
+	native title bar is removed, so overlapping windows on the same theme keep
+	a visible outline. The frame is skipped while maximized or fullscreen.
+	_"None"_ blends the background and foreground colors.
+
+	Default: _"None"_
+
 *opacity* = _<float>_
 
 	Background opacity as a floating point number from _0.0_ to _1.0_. The value

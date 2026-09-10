@@ -12,6 +12,7 @@ use alacritty_config_derive::{ConfigDeserialize, SerdeReplace};
 
 use crate::config::LOG_TARGET_CONFIG;
 use crate::config::ui_config::{Delta, Percentage};
+use crate::display::color::Rgb;
 
 /// Default Alacritty name, used for window title and class.
 pub const DEFAULT_NAME: &str = "Alacritty";
@@ -48,6 +49,9 @@ pub struct WindowConfig {
     /// Request blur behind the window.
     pub blur: bool,
 
+    /// Color of the frame drawn along the window edges on Windows.
+    pub border_color: Option<Rgb>,
+
     /// Controls which `Option` key should be treated as `Alt`.
     option_as_alt: OptionAsAlt,
 
@@ -72,6 +76,7 @@ impl Default for WindowConfig {
         Self {
             dynamic_title: true,
             blur: Default::default(),
+            border_color: Default::default(),
             embed: Default::default(),
             padding: Default::default(),
             opacity: Default::default(),

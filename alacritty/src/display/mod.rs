@@ -70,6 +70,8 @@ mod damage;
 mod meter;
 mod screenshot;
 mod tab_bar;
+#[cfg(windows)]
+mod window_border;
 
 /// Label for the forward terminal search bar.
 const FORWARD_SEARCH_LABEL: &str = "Search: ";
@@ -1203,6 +1205,9 @@ impl Display {
             let cursor_point = vi_cursor_point.or(Some(cursor_point));
             self.draw_hyperlink_preview(config, cursor_point, display_offset);
         }
+
+        #[cfg(windows)]
+        self.draw_window_border(config);
 
         // Notify winit that we're about to present.
         self.window.pre_present_notify();
