@@ -63,6 +63,7 @@ use crate::message_bar::{Message, MessageBuffer};
 #[cfg(unix)]
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
+use crate::terminal_title::normalize_terminal_title;
 use crate::updater::{self, UpdateState};
 use crate::window_context::WindowContext;
 
@@ -610,10 +611,6 @@ impl Event {
     ) -> Self {
         Self { window_id: window_id.into(), tab_id: Some(tab_id), payload }
     }
-}
-
-fn normalize_terminal_title(title: String) -> Option<String> {
-    (!title.is_empty()).then_some(title)
 }
 
 impl From<Event> for WinitEvent<Event> {

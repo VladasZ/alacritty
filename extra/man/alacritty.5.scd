@@ -649,6 +649,10 @@ The visible title for a tab is resolved in this order:
 . Terminal-provided title
 . Detected foreground process or working directory fallback
 
+On Windows the terminal-provided title comes from the console host. A leading
+_Administrator:_ prefix is dropped, and a title that is the path of an exe is
+shortened to the bare name, like _pwsh_.
+
 When a custom title is set, it remains static until it is explicitly cleared.
 To restore dynamic titles, open the title editor, submit an empty title, and
 press _Enter_.
