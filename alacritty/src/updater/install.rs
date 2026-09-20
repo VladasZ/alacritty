@@ -4,6 +4,7 @@
 //! thing uses to install the fork in the first place.
 
 use std::error::Error;
+use std::fmt::Write;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -131,7 +132,10 @@ fn verify(archive: &Path, release: &UpdateRelease) -> Result<()> {
             format!("{name} is {} bytes, the release says {}", bytes.len(), release.size).into()
         );
     }
-    let digest: String = Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut digest = String::new();
+    for byte in Sha256::digest(&bytes) {
+        write!(digest, "{byte:02x}")?;
+    }
     if digest != expected {
         return Err(format!("{name} sha256 is {digest}, SHA256SUMS says {expected}").into());
     }
