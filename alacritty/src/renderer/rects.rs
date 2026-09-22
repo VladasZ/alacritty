@@ -33,6 +33,19 @@ impl RenderRect {
     }
 }
 
+/// A flat-colored triangle in viewport pixels, y growing down from the top.
+/// Drawn through the same plain rect shader, which only reads position and
+/// color, so no new program is needed. Used for the resize grip and the close
+/// button's X, shapes the axis-aligned rect path cannot express. macOS keeps
+/// native window controls and no grip, so it never draws one.
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug, Copy, Clone)]
+pub struct RenderTriangle {
+    pub points: [(f32, f32); 3],
+    pub color: Rgb,
+    pub alpha: f32,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct RenderLine {
     pub start: Point<usize>,
@@ -394,6 +407,43 @@ impl RectRenderer {
         vertices.push(quad[2]);
         vertices.push(quad[3]);
         vertices.push(quad[1]);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn draw_triangles(&mut self, size_info: &SizeInfo, tris: &[RenderTriangle]) {
+        let half_width = size_info.width() / 2.;
+        let half_height = size_info.height() / 2.;
+
+        // The plain rect shader passes position straight to NDC and outputs the
+        // color, so building the vertices by hand is enough, no uniforms.
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(tris.len() * 3);
+        for tri in tris {
+            let (r, g, b) = tri.color.as_tuple();
+            let a = (tri.alpha * 255.) as u8;
+            for &(px, py) in &tri.points {
+                let x = px / half_width - 1.0;
+                let y = -py / half_height + 1.0;
+                vertices.push(Vertex { x, y, r, g, b, a });
+            }
+        }
+
+        unsafe {
+            gl::BindVertexArray(self.vao);
+            gl::BindBuffer(gl::ARRAY_BUFFER, self.vbo);
+
+            gl::UseProgram(self.programs[RectKind::Normal as usize].id());
+            gl::BufferData(
+                gl::ARRAY_BUFFER,
+                (vertices.len() * mem::size_of::<Vertex>()) as isize,
+                vertices.as_ptr() as *const _,
+                gl::STREAM_DRAW,
+            );
+            gl::DrawArrays(gl::TRIANGLES, 0, vertices.len() as i32);
+
+            gl::UseProgram(0);
+            gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+            gl::BindVertexArray(0);
+        }
     }
 }
 

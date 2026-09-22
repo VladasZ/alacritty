@@ -68,6 +68,8 @@ pub mod window;
 mod bell;
 mod damage;
 mod meter;
+#[cfg(windows)]
+mod resize_grip;
 mod screenshot;
 mod tab_bar;
 #[cfg(windows)]
@@ -1208,6 +1210,9 @@ impl Display {
 
         #[cfg(windows)]
         self.draw_window_border(config);
+
+        #[cfg(windows)]
+        self.draw_resize_grip(config);
 
         // Notify winit that we're about to present.
         self.window.pre_present_notify();

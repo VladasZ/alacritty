@@ -13,6 +13,10 @@ use crate::config::UiConfig;
 use crate::config::tabs::TabBarEdge;
 use crate::display::color::Rgb;
 use crate::renderer::rects::RenderRect;
+// macOS keeps native window controls, so the close X that needs triangles, and
+// the RenderTriangle type itself, only exist off macOS.
+#[cfg(not(target_os = "macos"))]
+use crate::renderer::rects::RenderTriangle;
 use crate::string::{ShortenDirection, StrShortener};
 use crate::updater::UpdateState;
 
@@ -75,6 +79,28 @@ fn closed_tab_span(open_cells: usize, closed_count: usize, available: usize) -> 
     }
     let spare = available.saturating_sub(open_cells) / closed_count;
     spare.clamp(CLOSED_TAB_SHRINK, CLOSED_TAB_CELLS)
+}
+
+/// Append the two triangles of a thick line from `a` to `b`, for the close X.
+/// Coordinates are viewport pixels with y growing down.
+#[cfg(not(target_os = "macos"))]
+fn push_stroke(
+    tris: &mut Vec<RenderTriangle>,
+    a: (f32, f32),
+    b: (f32, f32),
+    thickness: f32,
+    color: Rgb,
+) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+    // Half-stroke offset perpendicular to the line.
+    let (nx, ny) = (-dy / len * thickness / 2.0, dx / len * thickness / 2.0);
+    let p0 = (a.0 + nx, a.1 + ny);
+    let p1 = (a.0 - nx, a.1 - ny);
+    let p2 = (b.0 - nx, b.1 - ny);
+    let p3 = (b.0 + nx, b.1 + ny);
+    tris.push(RenderTriangle { points: [p0, p1, p2], color, alpha: 1.0 });
+    tris.push(RenderTriangle { points: [p0, p2, p3], color, alpha: 1.0 });
 }
 
 impl Display {
@@ -474,39 +500,131 @@ impl Display {
             }
         }
 
-        // Window controls on the right and a drag region over the whole strip.
-        // Only on platforms where we removed the native title bar.
+        // Window controls on the right, only where we removed the native title
+        // bar. Each button fills the whole strip height, so it reaches the top
+        // edge like a browser or a native Windows caption button, and its icon
+        // is drawn as crisp geometry rather than a small font glyph.
         #[cfg(not(target_os = "macos"))]
         if controls_cells > 0 {
+            let scale = self.window.scale_factor as f32;
+            // Icon half-size and stroke width, about a 10px icon at 100% scale.
+            let half = (5.0 * scale).round().max(3.0);
+            let stroke = scale.round().max(1.0);
+            let band_top = text_y - text_inset;
+            let band_h = band_height;
+
             let controls = [
-                (num_cols - WINDOW_BTN_CELLS * 3, TabHit::Minimize, " \u{2013}  "),
-                (num_cols - WINDOW_BTN_CELLS * 2, TabHit::MaximizeToggle, " \u{25a1}  "),
-                (num_cols - WINDOW_BTN_CELLS, TabHit::WindowClose, " \u{00d7}  "),
+                (num_cols - WINDOW_BTN_CELLS * 3, TabHit::Minimize),
+                (num_cols - WINDOW_BTN_CELLS * 2, TabHit::MaximizeToggle),
+                (num_cols - WINDOW_BTN_CELLS, TabHit::WindowClose),
             ];
-            for (col, hit, glyph) in controls {
+
+            let mut bg_rects: Vec<RenderRect> = Vec::new();
+            let mut icon_rects: Vec<RenderRect> = Vec::new();
+            let mut icon_tris: Vec<RenderTriangle> = Vec::new();
+
+            for (col, hit) in controls {
+                let bx = pad_x + cw * col as f32;
+                let bw = cw * WINDOW_BTN_CELLS as f32;
                 self.tab_hit_boxes.push(TabHitBox {
                     hit,
-                    x: (pad_x + cw * col as f32) as i32,
+                    x: bx as i32,
                     y,
-                    width: (cw * WINDOW_BTN_CELLS as f32) as i32,
+                    width: bw as i32,
                     height: bar_height,
                 });
-                let (btn_fg, btn_bg, btn_alpha) = if hovered != Some(hit) {
-                    (inactive_fg, bar_bg, alpha)
-                } else if hit == TabHit::WindowClose {
-                    (Rgb::new(0xff, 0xff, 0xff), Rgb::new(0xe8, 0x11, 0x23), 1.0)
+
+                let hover = hovered == Some(hit);
+                if hover {
+                    // Close goes red like a browser, the rest a neutral highlight.
+                    let bg = if hit == TabHit::WindowClose {
+                        Rgb::new(0xe8, 0x11, 0x23)
+                    } else {
+                        blend_rgb(bar_bg, active_bg, 0.5)
+                    };
+                    bg_rects.push(RenderRect::new(bx, band_top, bw, band_h, bg, 1.0));
+                }
+                let fg = if hover && hit == TabHit::WindowClose {
+                    Rgb::new(0xff, 0xff, 0xff)
                 } else {
-                    (inactive_fg, blend_rgb(bar_bg, active_bg, 0.5), 1.0)
+                    inactive_fg
                 };
-                self.draw_tab_bar_text(
-                    Point::new(line, Column(col)),
-                    btn_fg,
-                    btn_bg,
-                    btn_alpha,
-                    glyph,
-                    &size_info,
-                );
+
+                let cx = (bx + bw / 2.0).round();
+                let cy = (band_top + band_h / 2.0).round();
+                match hit {
+                    TabHit::Minimize => {
+                        icon_rects.push(RenderRect::new(
+                            cx - half,
+                            cy - stroke / 2.0,
+                            2.0 * half,
+                            stroke,
+                            fg,
+                            1.0,
+                        ));
+                    },
+                    TabHit::MaximizeToggle => {
+                        let side = 2.0 * half;
+                        icon_rects.push(RenderRect::new(
+                            cx - half,
+                            cy - half,
+                            side,
+                            stroke,
+                            fg,
+                            1.0,
+                        ));
+                        icon_rects.push(RenderRect::new(
+                            cx - half,
+                            cy + half - stroke,
+                            side,
+                            stroke,
+                            fg,
+                            1.0,
+                        ));
+                        icon_rects.push(RenderRect::new(
+                            cx - half,
+                            cy - half,
+                            stroke,
+                            side,
+                            fg,
+                            1.0,
+                        ));
+                        icon_rects.push(RenderRect::new(
+                            cx + half - stroke,
+                            cy - half,
+                            stroke,
+                            side,
+                            fg,
+                            1.0,
+                        ));
+                    },
+                    TabHit::WindowClose => {
+                        push_stroke(
+                            &mut icon_tris,
+                            (cx - half, cy - half),
+                            (cx + half, cy + half),
+                            stroke,
+                            fg,
+                        );
+                        push_stroke(
+                            &mut icon_tris,
+                            (cx - half, cy + half),
+                            (cx + half, cy - half),
+                            stroke,
+                            fg,
+                        );
+                    },
+                    _ => {},
+                }
             }
+
+            if !bg_rects.is_empty() {
+                self.renderer.draw_rects(&size_info, &metrics, bg_rects);
+            }
+            if !icon_rects.is_empty() {
+                self.renderer.draw_rects(&size_info, &metrics, icon_rects);
+            }
+            self.renderer.draw_triangles(&size_info, &icon_tris);
         }
 
         // The whole strip drags the window. Pushed last so tab and control hit

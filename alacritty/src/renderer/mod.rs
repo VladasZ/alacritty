@@ -21,6 +21,10 @@ use crate::display::color::Rgb;
 use crate::display::content::RenderableCell;
 use crate::gl;
 use crate::renderer::rects::{RectRenderer, RenderRect};
+// The triangle path only draws the resize grip and the caption close X, neither
+// of which macOS has, so it is unused there.
+#[cfg(not(target_os = "macos"))]
+use crate::renderer::rects::RenderTriangle;
 use crate::renderer::shader::ShaderError;
 
 pub mod platform;
@@ -260,6 +264,26 @@ impl Renderer {
             gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
 
             // Restore viewport with padding.
+            self.set_viewport(size_info);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn draw_triangles(&mut self, size_info: &SizeInfo, tris: &[RenderTriangle]) {
+        if tris.is_empty() {
+            return;
+        }
+
+        // Same state the rect path needs: full viewport, straight alpha blend.
+        unsafe {
+            gl::Viewport(0, 0, size_info.width() as i32, size_info.height() as i32);
+            gl::BlendFuncSeparate(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA, gl::SRC_ALPHA, gl::ONE);
+        }
+
+        self.rect_renderer.draw_triangles(size_info, tris);
+
+        unsafe {
+            gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
             self.set_viewport(size_info);
         }
     }

@@ -52,6 +52,10 @@ pub struct WindowConfig {
     /// Color of the frame drawn along the window edges on Windows.
     pub border_color: Option<Rgb>,
 
+    /// Size in physical pixels of the bottom-right resize corner on Windows,
+    /// both the grab zone and the drawn grip triangle.
+    pub resize_corner_size: u16,
+
     /// Controls which `Option` key should be treated as `Alt`.
     option_as_alt: OptionAsAlt,
 
@@ -77,6 +81,7 @@ impl Default for WindowConfig {
             dynamic_title: true,
             blur: Default::default(),
             border_color: Default::default(),
+            resize_corner_size: 20,
             embed: Default::default(),
             padding: Default::default(),
             opacity: Default::default(),

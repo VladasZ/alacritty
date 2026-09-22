@@ -1288,6 +1288,18 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         let x = self.ctx.mouse().x;
         let y = self.ctx.mouse().y;
 
+        // The bottom-right corner is the one people aim for and the plain 6px
+        // box is a tiny target, so on Windows it gets a larger square, sized by
+        // resize_corner_size, and marked by a drawn grip. Physical pixels like
+        // BORDER, no window handle needed here. The rest keeps the thin border.
+        #[cfg(target_os = "windows")]
+        {
+            let corner = self.ctx.config().window.resize_corner_size as usize;
+            if x + corner >= width && y + corner >= height {
+                return Some(ResizeDirection::SouthEast);
+            }
+        }
+
         let left = x <= BORDER;
         let right = x + BORDER >= width;
         let top = y <= BORDER;
