@@ -81,7 +81,7 @@ impl Default for WindowConfig {
             dynamic_title: true,
             blur: Default::default(),
             border_color: Default::default(),
-            resize_corner_size: 20,
+            resize_corner_size: 40,
             embed: Default::default(),
             padding: Default::default(),
             opacity: Default::default(),
