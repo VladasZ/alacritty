@@ -670,6 +670,10 @@ pub enum TabAction {
     SelectLast,
     MoveForward,
     MoveBackward,
+    /// Toggle the link between the active tab and its neighbor on this side.
+    Link {
+        forward: bool,
+    },
     SetTitle,
     ConfirmTitle,
     CancelTitle,
@@ -1074,6 +1078,13 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
     fn move_tab_backward(&mut self) {
         let _ = self.event_proxy.send_event(Event::new(
             EventType::Tab(TabAction::MoveBackward),
+            self.display.window.id(),
+        ));
+    }
+
+    fn link_tab(&mut self, forward: bool) {
+        let _ = self.event_proxy.send_event(Event::new(
+            EventType::Tab(TabAction::Link { forward }),
             self.display.window.id(),
         ));
     }

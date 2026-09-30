@@ -753,6 +753,12 @@ of open tabs is at least *tab_bar_min_tabs*.
 
 	Default: _20_
 
+*tab_link_color* = _"#RRGGBB"_ | _"None"_
+
+	Color of the line under a chain of linked tabs, see _LinkTabRight_.
+
+	Default: _"None"_, a pale dark red
+
 *active_tab_foreground* = _"#RRGGBB"_ | _"None"_
 
 	Foreground color for the active tab.
@@ -1093,11 +1099,16 @@ _https://docs.rs/winit/latest/winit/keyboard/enum.Key.html#variant.Dead_
 		*SelectLastTab*
 			Select the last tab.
 		*MoveTabForward* # _(Windows, Linux, and BSD only)_
-			Move the active tab one position forward.
+			Move the active tab, or its linked chain, one position forward.
 		*MoveTabBackward* # _(Windows, Linux, and BSD only)_
-			Move the active tab one position backward.
+			Move the active tab, or its linked chain, one position backward.
 		*SetTabTitle* # _(Windows, Linux, and BSD only)_
 			Open the custom title editor for the active tab.
+		*LinkTabRight*
+			Toggle a visual link between the active tab and the tab to its right.
+			A chain of linked tabs gets a line under it and moves as one block.
+		*LinkTabLeft*
+			Toggle a visual link between the active tab and the tab to its left.
 		*ToggleFullscreen*
 			Toggle fullscreen.
 		*ToggleMaximized*

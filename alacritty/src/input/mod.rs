@@ -120,6 +120,7 @@ pub trait ActionContext<T: EventListener> {
     fn select_last_tab(&mut self) {}
     fn move_tab_forward(&mut self) {}
     fn move_tab_backward(&mut self) {}
+    fn link_tab(&mut self, _forward: bool) {}
     fn set_tab_title(&mut self) {}
     fn window_close_confirmation_active(&self) -> bool {
         false
@@ -461,6 +462,8 @@ impl<T: EventListener> Execute<T> for Action {
             Action::SelectLastTab => ctx.select_last_tab(),
             Action::MoveTabForward => ctx.move_tab_forward(),
             Action::MoveTabBackward => ctx.move_tab_backward(),
+            Action::LinkTabLeft => ctx.link_tab(false),
+            Action::LinkTabRight => ctx.link_tab(true),
             Action::SetTabTitle => ctx.set_tab_title(),
             _ => (),
         }
@@ -557,9 +560,10 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
 
     /// Advance an active tab drag to the given pointer position.
     ///
-    /// The dragged tab follows the pointer and swaps with a neighbor once its
-    /// center passes the neighbor's center, like a browser. Swaps go through
-    /// the regular move events, so the tab list stays the source of truth.
+    /// The dragged tab follows the pointer together with its linked chain,
+    /// and swaps with the neighbor tab or chain once its center passes the
+    /// neighbor's center, like a browser. Swaps go through the regular move
+    /// events, so the tab list stays the source of truth.
     fn drag_tab(&mut self, pointer_x: f32) {
         let display = self.ctx.display();
         let Some(drag) = display.tab_drag.as_mut() else { return };
@@ -570,27 +574,37 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
         drag.active = true;
         let (index, grab_dx) = (drag.index, drag.grab_dx);
 
-        let Some((_, width)) = display.tab_bounds(index) else {
+        let (first, last) = display.tab_chain(index);
+        let bounds = display.tab_span_bounds(first, last);
+        let (Some((_, width)), false) = (bounds, display.tab_order_stale) else {
             self.ctx.mark_dirty();
             return;
         };
         let center = pointer_x - grab_dx.clamp(0., width) + width / 2.;
 
-        let backward = index
-            .checked_sub(1)
-            .and_then(|left| display.tab_bounds(left))
-            .is_some_and(|(x, w)| center < x + w / 2.);
-        let forward = display.tab_bounds(index + 1).is_some_and(|(x, w)| center > x + w / 2.);
+        let block = |(first, last): (usize, usize)| {
+            let (x, w) = display.tab_span_bounds(first, last)?;
+            Some((x + w / 2., last - first + 1))
+        };
+        let previous = first.checked_sub(1).and_then(|left| block(display.tab_chain(left)));
+        let next = block(display.tab_chain(last + 1));
 
-        if backward {
-            self.ctx.move_tab_backward();
-            if let Some(drag) = self.ctx.display().tab_drag.as_mut() {
-                drag.index -= 1;
-            }
-        } else if forward {
-            self.ctx.move_tab_forward();
-            if let Some(drag) = self.ctx.display().tab_drag.as_mut() {
-                drag.index += 1;
+        let shift = match (previous, next) {
+            (Some((mid, len)), _) if center < mid => {
+                self.ctx.move_tab_backward();
+                Some(-(len as isize))
+            },
+            (_, Some((mid, len))) if center > mid => {
+                self.ctx.move_tab_forward();
+                Some(len as isize)
+            },
+            _ => None,
+        };
+        if let Some(shift) = shift {
+            let display = self.ctx.display();
+            display.tab_order_stale = true;
+            if let Some(drag) = display.tab_drag.as_mut() {
+                drag.index = drag.index.saturating_add_signed(shift);
             }
         }
 
@@ -1097,7 +1111,9 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                     TabHit::Select(index) => {
                         self.ctx.select_tab_at_index(index);
                         let pointer_x = self.ctx.mouse().x as f32;
-                        if let Some((left, width)) = self.ctx.display().tab_bounds(index) {
+                        let display = self.ctx.display();
+                        let (first, last) = display.tab_chain(index);
+                        if let Some((left, width)) = display.tab_span_bounds(first, last) {
                             self.ctx.display().tab_drag = Some(TabDrag {
                                 index,
                                 grab_dx: (pointer_x - left).clamp(0., width),

@@ -226,6 +226,12 @@ pub enum Action {
     /// Move the active tab backward.
     MoveTabBackward,
 
+    /// Toggle a visual link between the active tab and its left neighbor.
+    LinkTabLeft,
+
+    /// Toggle a visual link between the active tab and its right neighbor.
+    LinkTabRight,
+
     /// Set a custom title for the active tab.
     SetTabTitle,
 

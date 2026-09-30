@@ -51,6 +51,7 @@ use crate::updater::UpdateState;
 use crate::{input, renderer};
 
 mod closed_tabs;
+pub(crate) mod tab_links;
 
 use closed_tabs::ClosedTab;
 
@@ -98,6 +99,9 @@ struct TerminalTab {
     shell_pid: u32,
     /// Set while the tab is closed but its shell still runs, see `closed_tabs`.
     closed: Option<ClosedTab>,
+    /// Visually linked to the next tab, see `tab_links`. Only an open tab
+    /// followed by another open tab is ever linked.
+    linked_right: bool,
 }
 
 impl TerminalTab {
@@ -162,6 +166,7 @@ impl TerminalTab {
             message_buffer: Default::default(),
             search_state: Default::default(),
             closed: None,
+            linked_right: false,
         })
     }
 
@@ -532,29 +537,6 @@ impl WindowContext {
         Ok(())
     }
 
-    fn move_active_tab(&mut self, delta: isize) {
-        if self.tabs.len() < 2 {
-            return;
-        }
-
-        let old_index = self.active_tab;
-        let new_index = if delta < 0 {
-            old_index.saturating_sub(delta.unsigned_abs())
-        } else {
-            (old_index + delta as usize).min(self.tabs.len() - 1)
-        };
-
-        if new_index == old_index || self.is_closed(old_index) || self.is_closed(new_index) {
-            return;
-        }
-
-        self.tabs.swap(old_index, new_index);
-        self.active_tab = new_index;
-        self.display.damage_tracker.frame().mark_fully_damaged();
-        self.display.damage_tracker.next_frame().mark_fully_damaged();
-        self.dirty = true;
-    }
-
     pub fn handle_tab_wakeup(&mut self, tab_id: Option<TabId>) {
         if let Some(index) = self.tab_index(tab_id) {
             let title_changed = self.tabs[index].refresh_detected_title(&self.config);
@@ -864,7 +846,11 @@ impl WindowContext {
                     return TabEntry::Closed { title: self.render_tab_title(index, tab, false) };
                 }
                 let active = index == self.active_tab;
-                TabEntry::Open { title: self.render_tab_title(index, tab, active), active }
+                TabEntry::Open {
+                    title: self.render_tab_title(index, tab, active),
+                    active,
+                    linked: tab.linked_right,
+                }
             })
             .collect();
         let active_index = self.active_tab;
@@ -955,8 +941,9 @@ impl WindowContext {
                                 self.set_active_tab(last);
                             }
                         },
-                        TabAction::MoveForward => self.move_active_tab(1),
-                        TabAction::MoveBackward => self.move_active_tab(-1),
+                        TabAction::MoveForward => self.move_active_tab(true),
+                        TabAction::MoveBackward => self.move_active_tab(false),
+                        TabAction::Link { forward } => self.toggle_tab_link(*forward),
                         TabAction::SetTitle => self.start_tab_title_editor(),
                         TabAction::ConfirmTitle => self.confirm_tab_title_editor(),
                         TabAction::CancelTitle => self.cancel_tab_title_editor(),

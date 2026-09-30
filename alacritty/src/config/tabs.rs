@@ -24,6 +24,7 @@ pub struct Tabs {
     pub inactive_tab_font_style: TabFontStyle,
     pub tab_bar_background: Option<Rgb>,
     pub close_grace_period: u64,
+    pub tab_link_color: Option<Rgb>,
     pub mouse: TabMouse,
 }
 
@@ -55,6 +56,7 @@ impl Default for Tabs {
             inactive_tab_font_style: Default::default(),
             tab_bar_background: None,
             close_grace_period: 20,
+            tab_link_color: None,
             mouse: Default::default(),
         }
     }

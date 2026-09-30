@@ -29,6 +29,7 @@ use crate::display::SizeInfo;
 use crate::event::{Event, EventProxy, EventType, TabAction, TabId};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 
+use super::tab_links::SavedLinks;
 use super::{TerminalTab, WindowContext};
 
 /// Tab id of the blank terminal shown while every tab of a window is closed.
@@ -41,6 +42,8 @@ pub(super) struct ClosedTab {
     at: Instant,
     /// Slot the tab had before the close, where a restore puts it back.
     origin: usize,
+    /// Links the tab had, put back on a restore.
+    links: SavedLinks,
 }
 
 /// Pick the tab to show when the tab at `from` goes away. Follows the switch
@@ -90,6 +93,7 @@ impl TerminalTab {
             #[cfg(not(windows))]
             shell_pid: 0,
             closed: None,
+            linked_right: false,
         })
     }
 }
@@ -169,9 +173,10 @@ impl WindowContext {
         }
 
         let next_id = self.next_live_tab(index).map(|next| self.tabs[next].id);
+        let links = self.unlink_tab(index);
         let closed_at = Instant::now();
         let mut tab = self.tabs.remove(index);
-        tab.closed = Some(ClosedTab { at: closed_at, origin: index });
+        tab.closed = Some(ClosedTab { at: closed_at, origin: index, links });
         let expire = TabAction::Expire { tab_id: tab.id, closed_at };
         self.tabs.push(tab);
         self.active_tab = self.tabs.len() - 1;
@@ -204,6 +209,7 @@ impl WindowContext {
         let tab = self.tabs.remove(index);
         let target = closed.origin.min(self.open_tab_count());
         self.tabs.insert(target, tab);
+        self.relink_tab(target, closed.links);
 
         if previous.is_some() {
             self.last_active_tab_id = previous;
@@ -237,6 +243,9 @@ impl WindowContext {
         let Some(index) = self.tab_index(tab_id) else {
             return false;
         };
+        if !self.is_closed(index) {
+            self.unlink_tab(index);
+        }
         let closing_tab_id = self.tabs[index].id;
         let was_active = index == self.active_tab;
         let next_active_id = if was_active {

@@ -44,6 +44,8 @@ const TAB_GAP: usize = 1;
 /// Width kept clear on the left for the macOS traffic lights, in points.
 #[cfg(target_os = "macos")]
 const TRAFFIC_LIGHT_POINTS: f32 = 78.0;
+/// Pale dark red of the link line when `tab_link_color` is unset.
+const DEFAULT_LINK_COLOR: Rgb = Rgb::new(0xa0, 0x52, 0x52);
 /// Width of each window control button, minimize, maximize, close, in cells.
 /// On Windows and Linux we draw our own controls at the right of the strip,
 /// like a browser, since the native title bar is removed.
@@ -58,6 +60,39 @@ struct TabLayout {
     label: String,
     active: bool,
     closed: bool,
+    /// Linked to the next tab, so the chain line runs on past its right edge.
+    linked: bool,
+    /// Part of a linked chain.
+    chained: bool,
+}
+
+/// A linked chain lifted out of the strip by a drag.
+#[derive(Clone, Copy)]
+struct FloatingChain {
+    first: usize,
+    last: usize,
+    /// Column of the first tab's slot.
+    start: usize,
+    /// Left edge of the chain under the pointer, in pixels.
+    x: f32,
+}
+
+/// Start and end column of the line under each linked chain in the strip.
+/// A chain cut off by an overflowing strip ends at its last visible tab.
+fn chain_lines(layouts: &[TabLayout], keep: impl Fn(usize) -> bool) -> Vec<(usize, usize)> {
+    let mut lines = Vec::new();
+    let mut current: Option<(usize, usize)> = None;
+    for layout in layouts.iter().filter(|layout| layout.chained && keep(layout.index)) {
+        let end = layout.start + layout.span;
+        let line = current.get_or_insert((layout.start, end));
+        line.1 = end;
+        if !layout.linked {
+            lines.extend(current.take());
+        }
+    }
+    lines.extend(current);
+    lines.retain(|line| line.0 < line.1);
+    lines
 }
 
 /// Width of a label in terminal cells.
@@ -186,11 +221,12 @@ impl Display {
         // title cap is the user's tab_title_max_length, 0 means unlimited.
         // A closed tab has a fixed narrow width instead, its title cut to fit.
         let max_title = config.tabs.tab_title_max_length;
-        let mut open: Vec<(usize, bool, String, usize)> = Vec::new();
+        let mut open: Vec<(usize, bool, bool, bool, String, usize)> = Vec::new();
         let mut closed: Vec<(usize, String)> = Vec::new();
+        let mut linked_before = false;
         for (index, entry) in entries.iter().enumerate() {
             match entry {
-                TabEntry::Open { title, active } => {
+                TabEntry::Open { title, active, linked } => {
                     let title: String = if max_title > 0 {
                         StrShortener::new(
                             title,
@@ -202,9 +238,11 @@ impl Display {
                     } else {
                         title.clone()
                     };
+                    let chained = *linked || linked_before;
+                    linked_before = *linked;
                     let label = format!(" {title}");
                     let span = (label_cells(&label) + CLOSE_CELLS).max(MIN_TAB_CELLS);
-                    open.push((index, *active, label, span));
+                    open.push((index, *active, *linked, chained, label, span));
                 },
                 TabEntry::Closed { title } => closed.push((index, format!(" {title}"))),
             }
@@ -218,7 +256,7 @@ impl Display {
         let group_gap = if closed.is_empty() { 0 } else { TAB_GAP };
         let available =
             tab_area_cols.saturating_sub(start_col + NEW_TAB_CELLS + 1 + group_gap + closed_gaps);
-        let open_total: usize = open.iter().map(|tab| tab.3).sum();
+        let open_total: usize = open.iter().map(|tab| tab.5).sum();
         let closed_span = closed_tab_span(open_total + open_gaps, closed.len(), available);
         let closed_width = closed.len() * closed_span + closed_gaps;
         let open_area_cols = tab_area_cols.saturating_sub(closed_width + group_gap);
@@ -229,10 +267,10 @@ impl Display {
         let budget = available.saturating_sub(open_gaps + closed.len() * closed_span);
         let cap = (!open.is_empty() && open_total > budget).then(|| {
             let mut lo = MIN_TAB_SHRINK;
-            let mut hi = open.iter().map(|tab| tab.3).max().unwrap_or(lo).max(lo);
+            let mut hi = open.iter().map(|tab| tab.5).max().unwrap_or(lo).max(lo);
             while lo < hi {
                 let mid = (lo + hi).div_ceil(2);
-                let capped: usize = open.iter().map(|tab| tab.3.min(mid)).sum();
+                let capped: usize = open.iter().map(|tab| tab.5.min(mid)).sum();
                 if capped <= budget {
                     lo = mid;
                 } else {
@@ -245,7 +283,7 @@ impl Display {
         // Lay tabs out first so the rects and the text agree on positions.
         let mut layouts: Vec<TabLayout> = Vec::new();
         let mut column = start_col;
-        for (index, active, mut label, natural_span) in open {
+        for (index, active, linked, chained, mut label, natural_span) in open {
             let span = cap.map_or(natural_span, |cap| natural_span.min(cap));
             if column + span >= open_area_cols {
                 break;
@@ -256,7 +294,16 @@ impl Display {
                 label = StrShortener::new(&label, fit, ShortenDirection::Right, Some(SHORTENER))
                     .collect();
             }
-            layouts.push(TabLayout { index, start: column, span, label, active, closed: false });
+            layouts.push(TabLayout {
+                index,
+                start: column,
+                span,
+                label,
+                active,
+                closed: false,
+                linked,
+                chained,
+            });
             column += span + TAB_GAP;
         }
         let new_tab_col = column;
@@ -278,21 +325,30 @@ impl Display {
                 label,
                 active: false,
                 closed: true,
+                linked: false,
+                chained: false,
             });
             column += closed_span + TAB_GAP;
         }
 
-        // A drag past the start threshold floats the pressed tab under the
-        // pointer, leaving an empty slot where it would land.
+        // A drag past the start threshold floats the pressed tab and its
+        // linked chain under the pointer, leaving an empty slot where they
+        // would land.
         let strip_left = pad_x + cw * start_col as f32;
         let strip_right = pad_x + cw * open_area_cols as f32;
         let floating = self.tab_drag.as_ref().filter(|drag| drag.active).and_then(|drag| {
-            let layout = layouts.iter().find(|layout| layout.index == drag.index)?;
-            let width = cw * layout.span as f32;
+            let (first, last) = self.tab_chain(drag.index);
+            let first_layout = layouts.iter().find(|layout| layout.index == first)?;
+            let last_layout = layouts.iter().find(|layout| layout.index == last)?;
+            let start = first_layout.start;
+            let width = cw * (last_layout.start + last_layout.span - start) as f32;
             let max_x = (strip_right - width).max(strip_left);
             let x = (drag.pointer_x - drag.grab_dx.clamp(0., width)).clamp(strip_left, max_x);
-            Some((drag.index, x))
+            Some(FloatingChain { first, last, start, x })
         });
+        let is_floating = |index: usize| {
+            floating.is_some_and(|chain| (chain.first..=chain.last).contains(&index))
+        };
 
         let hovered = if floating.is_some() { None } else { self.hovered_tab };
         let hover_bg = blend_rgb(inactive_bg, active_bg, 0.5);
@@ -300,6 +356,12 @@ impl Display {
         let closed_hover_bg = Rgb::new(0xd4, 0x4a, 0x4a);
         let closed_bg = blend_rgb(inactive_bg, closed_hover_bg, 0.6);
         let closed_fg = Rgb::new(0xf6, 0xf6, 0xf6);
+        let link_color = config.tabs.tab_link_color.unwrap_or(DEFAULT_LINK_COLOR);
+        let link_height = (3.0 * self.window.scale_factor as f32).round().max(1.0);
+        let link_line = |x: f32, width: f32| {
+            let y = tab_top + tab_height - link_height;
+            RenderRect::new(x, y, width, link_height, link_color, 1.0)
+        };
 
         // Rect pass: bar background, rounded tab backgrounds, hit boxes.
         let mut rects =
@@ -327,10 +389,9 @@ impl Display {
             };
             let x = pad_x + cw * layout.start as f32;
             let w = cw * layout.span as f32;
-            // The floating tab keeps its slot hit boxes for the reorder math,
+            // A floating tab keeps its slot hit boxes for the reorder math,
             // but its slot stays empty, the tab itself is drawn last on top.
-            let in_slot = floating.is_none_or(|(index, _)| index != layout.index);
-            if in_slot {
+            if !is_floating(layout.index) {
                 rects.push(RenderRect::new(x, tab_top, w, tab_height, rendered_bg, bg_alpha));
                 // Round the top corners by cutting them with the strip color.
                 for row in 0..radius {
@@ -368,6 +429,11 @@ impl Display {
                 height: bar_height,
             });
         }
+        rects.extend(
+            chain_lines(&layouts, |index| !is_floating(index)).into_iter().map(|(start, end)| {
+                link_line(pad_x + cw * start as f32, cw * (end - start) as f32)
+            }),
+        );
         if show_new_tab {
             self.tab_hit_boxes.push(TabHitBox {
                 hit: TabHit::New,
@@ -381,7 +447,7 @@ impl Display {
 
         // Text pass: labels, close buttons, new-tab button.
         for layout in &layouts {
-            if floating.is_some_and(|(index, _)| index == layout.index) {
+            if is_floating(layout.index) {
                 continue;
             }
             if layout.closed {
@@ -424,8 +490,9 @@ impl Display {
             } else {
                 (blend_rgb(base_bg, tab_bg, alpha), alpha)
             };
+            let text_col = layout.start + centering_offset(layout);
             self.draw_tab_bar_text(
-                Point::new(line, Column(layout.start + centering_offset(layout))),
+                Point::new(line, Column(text_col)),
                 fg,
                 rendered_bg,
                 bg_alpha,
@@ -637,37 +704,63 @@ impl Display {
             height: bar_height,
         });
 
-        // The floating tab draws after everything else so it covers its
-        // neighbors while it moves. Press always selects the tab, so it uses
-        // the active style.
-        if let Some((index, x)) = floating {
-            if let Some(layout) = layouts.iter().find(|layout| layout.index == index) {
-                let width = cw * layout.span as f32;
-                let mut rects = vec![RenderRect::new(x, tab_top, width, tab_height, active_bg, 1.)];
+        // The floating chain draws after everything else so it covers its
+        // neighbors while it moves. Press always selects the pressed tab, so
+        // that one uses the active style.
+        if let Some(chain) = floating {
+            let members: Vec<&TabLayout> = layouts
+                .iter()
+                .filter(|layout| (chain.first..=chain.last).contains(&layout.index))
+                .collect();
+            let tab_x = |layout: &TabLayout| chain.x + cw * (layout.start - chain.start) as f32;
+
+            let mut rects = Vec::new();
+            for layout in &members {
+                let (x, width) = (tab_x(layout), cw * layout.span as f32);
+                let (bg, bg_alpha) = if layout.active {
+                    (active_bg, 1.)
+                } else {
+                    (blend_rgb(base_bg, inactive_bg, alpha), alpha)
+                };
+                rects.push(RenderRect::new(x, tab_top, width, tab_height, bg, bg_alpha));
                 for row in 0..radius {
                     let cut = (radius - row) as f32;
                     let ry = tab_top + row as f32;
                     rects.push(RenderRect::new(x, ry, cut, 1.0, bar_bg, alpha));
                     rects.push(RenderRect::new(x + width - cut, ry, cut, 1.0, bar_bg, alpha));
                 }
-                self.renderer.draw_rects(&size_info, &metrics, rects);
+            }
+            if let (Some(first), Some(last)) = (members.first(), members.last()) {
+                if first.index != last.index {
+                    let end = tab_x(last) + cw * last.span as f32;
+                    rects.push(link_line(tab_x(first), end - tab_x(first)));
+                }
+            }
+            self.renderer.draw_rects(&size_info, &metrics, rects);
 
+            for layout in &members {
+                let (fg, bg, bg_alpha) = if layout.active {
+                    (active_fg, active_bg, 1.)
+                } else {
+                    (inactive_fg, blend_rgb(base_bg, inactive_bg, alpha), alpha)
+                };
                 // A shifted viewport places the glyphs at the fractional
                 // pixel offset that cell coordinates cannot express.
-                self.renderer.set_shifted_viewport(&size_info, x - pad_x);
+                self.renderer.set_shifted_viewport(&size_info, tab_x(layout) - pad_x);
+                let text_col = centering_offset(layout);
                 self.draw_tab_bar_text(
-                    Point::new(line, Column(centering_offset(layout))),
-                    active_fg,
-                    active_bg,
-                    1.,
+                    Point::new(line, Column(text_col)),
+                    fg,
+                    bg,
+                    bg_alpha,
                     &layout.label,
                     &size_info,
                 );
                 self.draw_tab_bar_text(
                     Point::new(line, Column(layout.span - 2)),
-                    active_fg,
-                    active_bg,
-                    1.,
+                    fg,
+                    bg,
+                    bg_alpha,
                     "\u{00d7}",
                     &size_info,
                 );
@@ -680,7 +773,25 @@ impl Display {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLOSED_TAB_CELLS, CLOSED_TAB_SHRINK, closed_tab_span};
+    use super::{CLOSED_TAB_CELLS, CLOSED_TAB_SHRINK, TabLayout, chain_lines, closed_tab_span};
+
+    fn tab(index: usize, start: usize, linked: bool, chained: bool) -> TabLayout {
+        let label = String::new();
+        TabLayout { index, start, span: 10, label, active: false, closed: false, linked, chained }
+    }
+
+    #[test]
+    fn chain_lines_run_under_each_whole_chain() {
+        // Tabs 0, 1-2, 3-4, the last chain cut off after tab 3.
+        let layouts = [
+            tab(0, 0, false, false),
+            tab(1, 11, true, true),
+            tab(2, 22, false, true),
+            tab(3, 33, true, true),
+        ];
+        assert_eq!(chain_lines(&layouts, |_| true), vec![(11, 32), (33, 43)]);
+        assert_eq!(chain_lines(&layouts, |index| index > 2), vec![(33, 43)]);
+    }
 
     #[test]
     fn closed_tabs_shrink_before_open_tabs_and_stop_at_the_floor() {

@@ -32,6 +32,13 @@ default, the tab disappears and the process is killed. This holds for the last
 tab of a window too, the window stays open until the tab expires. Set the
 period to `0` for instant close.
 
+Tabs can be linked into a chain as a visual hint. `LinkTabRight` and
+`LinkTabLeft` toggle a link between the active tab and its neighbor, and a
+line runs under every chain. The links carry no other meaning, but a chain
+stays together, so dragging or moving a linked tab moves the whole chain. The
+line color is `tab_link_color` under `[tabs]`. Closing a tab in the middle of
+a chain keeps its neighbors linked, and a restore puts its links back.
+
 Upstream Alacritty has historically declined adding tabs by design. See
 [Tabs support in the terminal (#3129)](https://github.com/alacritty/alacritty/issues/3129),
 which is closed with the `F - wontfix` label.
@@ -50,6 +57,7 @@ inactive_tab_foreground = "#cdd6f4"
 inactive_tab_background = "#0b0b12"
 tab_bar_background = "#11111b"
 tab_bar_height = 2.4
+tab_link_color = "#a05252"
 mouse = { enabled = true, hover = true }
 
 [keyboard]
@@ -61,6 +69,8 @@ bindings = [
   { key = ".", mods = "Super", action = "MoveTabForward" },
   { key = ",", mods = "Super", action = "MoveTabBackward" },
   { key = "T", mods = "Super|Alt", action = "SetTabTitle" },
+  { key = "Right", mods = "Super|Shift", action = "LinkTabRight" },
+  { key = "Left", mods = "Super|Shift", action = "LinkTabLeft" },
 ]
 ```
 

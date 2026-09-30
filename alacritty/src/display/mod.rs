@@ -349,12 +349,12 @@ pub enum TabEntry {
     Open {
         title: String,
         active: bool,
+        /// Visually linked to the next tab.
+        linked: bool,
     },
     /// A closed tab whose shell still runs, drawn red at full width with a
     /// restore button in place of the close button.
-    Closed {
-        title: String,
-    },
+    Closed { title: String },
 }
 
 /// Tab strip content for one frame.
@@ -428,6 +428,13 @@ pub struct Display {
 
     /// In-progress tab drag, the pressed tab follows the pointer.
     pub tab_drag: Option<TabDrag>,
+
+    /// Link flag of every tab in the last drawn strip, see `TabEntry::Open`.
+    tab_links: Vec<bool>,
+
+    /// Set when a drag moved tabs the strip has not drawn yet. The drag waits
+    /// for the redraw, since its bounds and links are from before the move.
+    pub tab_order_stale: bool,
 
     /// Hint highlighted by the mouse.
     pub highlighted_hint: Option<HintMatch>,
@@ -660,6 +667,8 @@ impl Display {
             pending_screenshot: false,
             hovered_tab: None,
             tab_drag: None,
+            tab_links: Vec::new(),
+            tab_order_stale: false,
             visual_bell: VisualBell::from(&config.bell),
             renderer: ManuallyDrop::new(renderer),
             renderer_preference: config.debug.renderer,
@@ -1186,6 +1195,12 @@ impl Display {
         }
 
         self.tab_hit_boxes.clear();
+        self.tab_order_stale = false;
+        self.tab_links = tab_bar
+            .entries
+            .iter()
+            .map(|entry| matches!(entry, TabEntry::Open { linked: true, .. }))
+            .collect();
         if config.tabs.display_tab_bar(tab_bar.entries.len()) {
             let line = match config.tabs.tab_bar_edge {
                 TabBarEdge::Top => 0,
@@ -1267,6 +1282,18 @@ impl Display {
             let inside_y = (hit_box.y..hit_box.y + hit_box.height).contains(&(y as i32));
             (inside_x && inside_y).then_some(hit_box.hit)
         })
+    }
+
+    /// First and last index of the linked chain holding the tab at `index`.
+    pub fn tab_chain(&self, index: usize) -> (usize, usize) {
+        crate::window_context::tab_links::chain_bounds(&self.tab_links, index)
+    }
+
+    /// Left edge and width of the tabs from `first` to `last` together.
+    pub fn tab_span_bounds(&self, first: usize, last: usize) -> Option<(f32, f32)> {
+        let (left, _) = self.tab_bounds(first)?;
+        let (right_x, right_w) = self.tab_bounds(last)?;
+        Some((left, right_x + right_w - left))
     }
 
     /// Left edge and width of a tab's slot, select plus close area.
