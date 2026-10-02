@@ -187,6 +187,9 @@ fn alacritty(mut options: Options) -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "macos")]
     macos::disable_autofill();
 
+    #[cfg(target_os = "macos")]
+    macos::quit::confirm_quit();
+
     // Spawn the Unix I/O event polling thread.
     #[cfg(unix)]
     let socket_path = match IoListener::spawn(&config, &options, window_event_loop.create_proxy()) {
