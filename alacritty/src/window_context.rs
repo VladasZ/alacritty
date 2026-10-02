@@ -51,6 +51,8 @@ use crate::updater::UpdateState;
 use crate::{input, renderer};
 
 mod closed_tabs;
+#[cfg(target_os = "macos")]
+mod parked;
 pub(crate) mod tab_links;
 
 use closed_tabs::ClosedTab;
@@ -256,6 +258,9 @@ pub struct WindowContext {
     last_active_tab_id: Option<TabId>,
     tab_title_editor: Option<TabTitleEditor>,
     window_close_confirmation_pending: bool,
+    /// Set while the window is hidden with its tabs alive, see `parked`.
+    #[cfg(target_os = "macos")]
+    parked: bool,
     focused: bool,
     modifiers: Modifiers,
     mouse: Mouse,
@@ -695,6 +700,8 @@ impl WindowContext {
             last_active_tab_id: None,
             tab_title_editor: None,
             window_close_confirmation_pending: false,
+            #[cfg(target_os = "macos")]
+            parked: false,
             focused: false,
             event_proxy: proxy,
         })
@@ -903,6 +910,9 @@ impl WindowContext {
         for event in queued_events {
             match &event {
                 WinitEvent::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                    #[cfg(target_os = "macos")]
+                    self.park_or_close(scheduler);
+                    #[cfg(not(target_os = "macos"))]
                     self.request_window_close();
                     continue;
                 },
@@ -921,6 +931,10 @@ impl WindowContext {
                         TabAction::Expire { tab_id, closed_at } => {
                             self.expire_tab(*tab_id, *closed_at);
                         },
+                        #[cfg(target_os = "macos")]
+                        TabAction::Unpark => self.unpark(scheduler),
+                        #[cfg(target_os = "macos")]
+                        TabAction::ParkExpire => self.expire_park(),
                         #[cfg(not(target_os = "macos"))]
                         TabAction::RequestClose => self.request_window_close(),
                         TabAction::ConfirmWindowClose => self.confirm_window_close(),

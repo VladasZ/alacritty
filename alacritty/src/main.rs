@@ -188,7 +188,7 @@ fn alacritty(mut options: Options) -> Result<(), Box<dyn Error>> {
     macos::disable_autofill();
 
     #[cfg(target_os = "macos")]
-    macos::quit::confirm_quit();
+    macos::quit::hook_quit_and_reopen(window_event_loop.create_proxy());
 
     // Spawn the Unix I/O event polling thread.
     #[cfg(unix)]

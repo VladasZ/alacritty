@@ -30,6 +30,8 @@ pub enum Topic {
     BlinkTimeout,
     Frame,
     TabExpiry,
+    #[cfg(target_os = "macos")]
+    WindowPark,
 }
 
 /// Event scheduled to be emitted at a specific time.

@@ -1,18 +1,23 @@
-//! Ask before the app quits while a tab still runs a process.
+//! Ask before the app quits while a tab still runs a process, and hand the
+//! quit and the reopen over to the event loop, which parks the windows.
 
+use std::ffi::CString;
 use std::mem::{self, MaybeUninit};
+use std::sync::OnceLock;
 use std::{process, ptr};
 
 use libc::{PROC_PIDTBSDINFO, c_int, pid_t, proc_bsdinfo, proc_listchildpids, proc_pidinfo};
 use log::warn;
 use objc2::ffi::class_addMethod;
-use objc2::runtime::{AnyObject, Imp, Sel};
-use objc2::{MainThreadMarker, sel};
+use objc2::runtime::{AnyObject, Bool, Imp, Sel};
+use objc2::{Encode, MainThreadMarker, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationTerminateReply,
 };
 use objc2_foundation::{NSString, ns_string};
+use winit::event_loop::EventLoopProxy;
 
+use crate::event::{Event, EventType, TabAction};
 use crate::macos::proc;
 
 /// Upper bound for the children of one process, the terminal has one per tab.
@@ -21,11 +26,23 @@ const MAX_CHILDREN: usize = 1024;
 type ShouldTerminate =
     unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> NSApplicationTerminateReply;
 
-/// Make every quit path ask first when a tab is busy.
+type ShouldHandleReopen =
+    unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, Bool) -> Bool;
+
+/// Where the delegate methods send the quit and the reopen.
+static PROXY: OnceLock<EventLoopProxy<Event>> = OnceLock::new();
+
+/// Make every quit path ask first when a tab is busy, then park the windows
+/// instead of ending the process, and show them again on a reopen.
 ///
 /// Cmd+Q, the menu item and the Dock all end in `terminate:`, and winit's delegate has no
-/// `applicationShouldTerminate:`, so the method is added to its class here.
-pub fn confirm_quit() {
+/// `applicationShouldTerminate:`, so the method is added to its class here. The same goes
+/// for `applicationShouldHandleReopen:hasVisibleWindows:`, sent on a Dock click or `open -a`.
+pub fn hook_quit_and_reopen(proxy: EventLoopProxy<Event>) {
+    if PROXY.set(proxy).is_err() {
+        warn!("Quit is already hooked");
+        return;
+    }
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -43,6 +60,52 @@ pub fn confirm_quit() {
     if !added.as_bool() {
         warn!("Could not hook application quit, quit will not ask for confirmation");
     }
+
+    // BOOL is a char on Intel and a bool on Apple silicon, so the type string is built.
+    let bool_type = Bool::ENCODING;
+    let Ok(types) = CString::new(format!("{bool_type}@:@{bool_type}")) else {
+        return;
+    };
+    let added = unsafe {
+        let imp = mem::transmute::<ShouldHandleReopen, Imp>(should_handle_reopen);
+        let sel = sel!(applicationShouldHandleReopen:hasVisibleWindows:);
+        class_addMethod(class, sel, imp, types.as_ptr())
+    };
+    if !added.as_bool() {
+        warn!("Could not hook application reopen, closed windows will not come back");
+    }
+}
+
+fn send(payload: EventType) -> bool {
+    let Some(proxy) = PROXY.get() else {
+        return false;
+    };
+    match proxy.send_event(Event::new(payload, None)) {
+        Ok(()) => true,
+        Err(err) => {
+            warn!("Event loop is gone: {err}");
+            false
+        },
+    }
+}
+
+unsafe extern "C-unwind" fn should_handle_reopen(
+    _this: *mut AnyObject,
+    _cmd: Sel,
+    _sender: *mut AnyObject,
+    _has_visible_windows: Bool,
+) -> Bool {
+    send(EventType::Tab(TabAction::Unpark));
+    Bool::YES
+}
+
+/// The event loop parks the windows and ends the process itself once nothing is left.
+fn park_or_terminate() -> NSApplicationTerminateReply {
+    if send(EventType::Quit) {
+        NSApplicationTerminateReply::TerminateCancel
+    } else {
+        NSApplicationTerminateReply::TerminateNow
+    }
 }
 
 unsafe extern "C-unwind" fn should_terminate(
@@ -55,7 +118,7 @@ unsafe extern "C-unwind" fn should_terminate(
         return NSApplicationTerminateReply::TerminateNow;
     };
     if names.is_empty() {
-        return NSApplicationTerminateReply::TerminateNow;
+        return park_or_terminate();
     }
 
     let alert = NSAlert::new(mtm);
@@ -65,7 +128,7 @@ unsafe extern "C-unwind" fn should_terminate(
     alert.addButtonWithTitle(ns_string!("Cancel"));
 
     if alert.runModal() == NSAlertFirstButtonReturn {
-        NSApplicationTerminateReply::TerminateNow
+        park_or_terminate()
     } else {
         NSApplicationTerminateReply::TerminateCancel
     }

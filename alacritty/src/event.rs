@@ -31,6 +31,8 @@ use winit::event::{
     Touch as TouchEvent, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop, EventLoopProxy};
+#[cfg(target_os = "macos")]
+use winit::platform::macos::ActiveEventLoopExtMacOS;
 use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::{Theme as WinitTheme, WindowId};
 
@@ -458,6 +460,21 @@ impl ApplicationHandler<Event> for Processor {
                     self.redraw_all_windows();
                 }
             },
+            // Park every window instead of quitting. A quit with nothing left to park is final.
+            #[cfg(target_os = "macos")]
+            (EventType::Quit, _) => {
+                if self.windows.values().all(WindowContext::is_parked) {
+                    event_loop.exit();
+                    return;
+                }
+
+                for window_context in self.windows.values_mut() {
+                    window_context.park_or_close(&mut self.scheduler);
+                }
+                if self.windows.values().all(WindowContext::is_parked) {
+                    event_loop.hide_application();
+                }
+            },
             // Process events affecting all windows.
             (payload, None) => {
                 let event = WinitEvent::UserEvent(Event { window_id: None, tab_id, payload });
@@ -644,6 +661,9 @@ pub enum EventType {
     Update(UpdateState),
     /// The update chip was clicked while a release is offered.
     InstallUpdate,
+    /// The app was asked to quit, from Cmd+Q, the menu or the Dock.
+    #[cfg(target_os = "macos")]
+    Quit,
     Frame,
 }
 
@@ -684,6 +704,12 @@ pub enum TabAction {
         tab_id: TabId,
         closed_at: Instant,
     },
+    /// Show a parked window again, see `window_context::parked`.
+    #[cfg(target_os = "macos")]
+    Unpark,
+    /// The grace period of a parked window ended.
+    #[cfg(target_os = "macos")]
+    ParkExpire,
 }
 
 /// Regex search state.
@@ -2230,6 +2256,8 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                 | EventType::Shutdown
                 | EventType::Screenshot => (),
                 EventType::Tab(_) | EventType::Update(_) | EventType::InstallUpdate => (),
+                #[cfg(target_os = "macos")]
+                EventType::Quit => (),
                 EventType::Message(_)
                 | EventType::ConfigReload(_)
                 | EventType::CreateWindow(_)
