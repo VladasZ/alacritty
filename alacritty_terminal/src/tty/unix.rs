@@ -100,15 +100,31 @@ fn get_pw_entry(buf: &mut [i8; 1024]) -> Result<Passwd<'_>> {
 }
 
 pub struct Pty {
-    child: Child,
+    // Declared before `child`, so the master side closes before the wait in `Reaper`.
     file: File,
+    child: Reaper,
     signals: UnixStream,
     sig_id: SigId,
 }
 
+/// Waits for the child when dropped.
+///
+/// The wait runs after the master side of the PTY is closed. A child that writes while it handles
+/// the hangup, or restores the terminal modes, waits for the terminal to take that output. With
+/// the master still open and nobody reading it, that never ends, and neither does the wait.
+struct Reaper(Child);
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        if let Err(err) = self.0.wait() {
+            error!("Error waiting for the PTY child: {err}");
+        }
+    }
+}
+
 impl Pty {
     pub fn child(&self) -> &Child {
-        &self.child
+        &self.child.0
     }
 
     pub fn file(&self) -> &File {
@@ -283,7 +299,7 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
                 set_nonblocking(master_fd);
             }
 
-            Ok(Pty { child, file: File::from(master), signals, sig_id })
+            Ok(Pty { file: File::from(master), child: Reaper(child), signals, sig_id })
         },
         Err(err) => Err(Error::new(
             err.kind(),
@@ -300,13 +316,11 @@ impl Drop for Pty {
     fn drop(&mut self) {
         // Make sure the PTY is terminated properly.
         unsafe {
-            libc::kill(self.child.id() as i32, libc::SIGHUP);
+            libc::kill(self.child.0.id() as i32, libc::SIGHUP);
         }
 
         // Clear signal-hook handler.
         unregister_signal(self.sig_id);
-
-        let _ = self.child.wait();
     }
 }
 
@@ -382,7 +396,7 @@ impl EventedPty for Pty {
         }
 
         // Match on the child process.
-        match self.child.try_wait() {
+        match self.child.0.try_wait() {
             Err(err) => {
                 error!("Error checking child process termination: {err}");
                 None
@@ -435,4 +449,44 @@ unsafe fn set_nonblocking(fd: c_int) {
 fn test_get_pw_entry() {
     let mut buf: [i8; 1024] = [0; 1024];
     let _pw = get_pw_entry(&mut buf).unwrap();
+}
+
+// A child that prints while it handles the hangup leaves output nobody reads any more. Its exit
+// then waits for the terminal to take that output, and dropping the PTY used to wait for the
+// child, so both hung forever.
+#[test]
+fn drop_ends_a_child_that_prints_on_hangup() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use crate::tty::Shell;
+
+    let script = "trap 'echo bye; exit 0' HUP; echo ready; while :; do sleep 0.1; done";
+    let shell = Shell::new("/bin/sh".into(), vec!["-c".into(), script.into()]);
+    let options = Options { shell: Some(shell), ..Options::default() };
+    let window_size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
+    let mut pty = new(&options, window_size, 0).unwrap();
+
+    // The trap must be set before the hangup arrives.
+    let start = Instant::now();
+    let mut output = Vec::new();
+    while !output.windows(5).any(|window| window == b"ready") {
+        assert!(start.elapsed() < Duration::from_secs(10), "the child never started");
+        let mut buf = [0; 64];
+        match pty.reader().read(&mut buf) {
+            Ok(read) => output.extend_from_slice(&buf[..read]),
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            },
+            Err(err) => panic!("cannot read the PTY: {err}"),
+        }
+    }
+
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        drop(pty);
+        sender.send(()).unwrap();
+    });
+    receiver.recv_timeout(Duration::from_secs(10)).expect("dropping the PTY hangs");
 }
