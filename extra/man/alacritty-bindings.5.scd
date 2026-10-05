@@ -472,6 +472,14 @@ configuration. See *alacritty*(5) for full configuration format documentation.
 :  _"Control|Shift|Alt"_
 :[
 :  _"SetTabTitle"_
+|  _"Right"_
+:  _"Alt"_
+:[
+:  _"LinkTabRight"_
+|  _"Left"_
+:  _"Alt"_
+:[
+:  _"LinkTabLeft"_
 
 ## Windows only
 
@@ -594,6 +602,14 @@ configuration. See *alacritty*(5) for full configuration format documentation.
 :  _"Command|Shift"_
 :[
 :  _"SelectPreviousTab"_
+|  _"Right"_
+:  _"Command"_
+:[
+:  _"LinkTabRight"_
+|  _"Left"_
+:  _"Command"_
+:[
+:  _"LinkTabLeft"_
 |  _"1"_
 :  _"Command"_
 :[
