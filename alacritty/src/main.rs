@@ -39,7 +39,6 @@ mod logging;
 mod macos;
 mod message_bar;
 mod migrate;
-#[cfg(windows)]
 mod panic;
 #[cfg(unix)]
 mod polling;
@@ -69,7 +68,6 @@ use crate::macos::locale;
 use crate::polling::{IoListener, ipc};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    #[cfg(windows)]
     panic::attach_handler();
 
     // When linked with the windows subsystem windows won't automatically attach
